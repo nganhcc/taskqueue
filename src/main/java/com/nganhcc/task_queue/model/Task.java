@@ -37,6 +37,9 @@ public class Task {
     @Column(name = "max_retries", nullable = false)
     private int maxRetries;
 
+    @Column(name= "priority", nullable = false)
+    private int priority;
+
     @Column(name = "run_at")
     private Instant runAt;
 
@@ -58,7 +61,7 @@ public class Task {
     protected Task() {
     }
 
-    public Task(UUID id, String queue, String fn, String payload, int maxRetries, Instant runAt) {
+    public Task(UUID id, String queue, String fn, String payload, int maxRetries, int priority, Instant runAt) {
         this.id = id;
         this.queue = queue;
         this.fn = fn;
@@ -66,11 +69,17 @@ public class Task {
         this.status = TaskStatus.PENDING;
         this.attempt = 0;
         this.maxRetries = maxRetries;
+        this.priority=priority;
         this.runAt = runAt;
+        applyDefaults();
     }
 
     @PrePersist
     void beforeInsert() {
+        applyDefaults();
+    }
+
+    private void applyDefaults() {
         if (this.id == null) {
             this.id = UUID.randomUUID();
         }
@@ -136,6 +145,14 @@ public class Task {
 
     public void setMaxRetries(int maxRetries) {
         this.maxRetries = maxRetries;
+    }
+
+    public int getPriority(){
+        return priority;
+    }
+
+    public void setPriority(int priority){
+        this.priority=priority;
     }
 
     public Instant getRunAt() {
