@@ -51,6 +51,8 @@ taskqueue:
       concurrency: 4
       max-retries: 3
       base-delay-ms: 1000
+  worker:
+    poll-interval-ms: 1000
 
   scheduler:
     poll-interval-ms: 1000        

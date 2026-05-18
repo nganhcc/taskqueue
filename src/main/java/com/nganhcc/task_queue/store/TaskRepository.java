@@ -18,4 +18,10 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     List<Task> findByStatusAndRunAtLessThanEqual(TaskStatus status, Instant runAt);
 
     List<Task> findByStatusAndStartedAtBefore(TaskStatus status, Instant startedAt);
+
+    List<Task> findByQueue(String queue);
+
+    long countByStatus(TaskStatus status);
+
+    List<Task> findByQueueAndStatusIn(String queue, List<TaskStatus> statuses);
 }
