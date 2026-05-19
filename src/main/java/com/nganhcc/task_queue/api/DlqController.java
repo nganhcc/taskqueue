@@ -6,6 +6,7 @@ import java.util.UUID;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.nganhcc.task_queue.api.dto.TaskResponse;
@@ -39,12 +40,16 @@ public class DlqController {
     }
 
     @PostMapping("/dlq/{id}/replay")
-    public TaskResponse replay(@PathVariable UUID id) {
+    public TaskResponse replay(@PathVariable UUID id,
+            @RequestParam(defaultValue = "false") boolean resetAttempts) {
         Task dlqTask = redisBroker.findDlqTask(id);
         Task task = taskRepository.findById(id).orElseThrow(() -> new TaskNotFoundException(id));
         redisBroker.removeFromDlq(dlqTask);
 
         task.setStatus(TaskStatus.PENDING);
+        if (resetAttempts) {
+            task.setAttempt(0);
+        }
         task.setRunAt(null);
         task.setStartedAt(null);
         task.setError(null);
