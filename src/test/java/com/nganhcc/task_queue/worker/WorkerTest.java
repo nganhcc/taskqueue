@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,7 @@ class WorkerTest {
     private RedisBroker redisBroker;
     private HandlerRegistry handlerRegistry;
     private TaskHandler taskHandler;
+    private QueueProperties queueProperties;
     private Worker worker;
 
     @BeforeEach
@@ -40,12 +42,17 @@ class WorkerTest {
         handlerRegistry = mock(HandlerRegistry.class);
         taskHandler = mock(TaskHandler.class);
 
-        QueueProperties queueProperties = new QueueProperties();
+        queueProperties = new QueueProperties();
         HashMap<String, QueueConfig> queues = new HashMap<>();
         queues.put("default", queueConfig(1000));
         queueProperties.setQueues(queues);
 
         worker = new Worker(taskRepository, redisBroker, new RetryPolicy(), handlerRegistry, queueProperties);
+    }
+
+    @AfterEach
+    void tearDown() {
+        worker.shutdown();
     }
 
     @Test
@@ -97,6 +104,7 @@ class WorkerTest {
         assertThat(dbTask.getStatus()).isEqualTo(TaskStatus.PENDING);
         assertThat(dbTask.getAttempt()).isEqualTo(1);
         assertThat(dbTask.getError()).isEqualTo("boom");
+        assertThat(dbTask.getStackTrace()).contains("RuntimeException").contains("boom");
         assertThat(dbTask.getRunAt()).isNotNull();
         verify(redisBroker).enqueueDelayed(dbTask);
         verify(redisBroker).acknowledge(polledTask);
@@ -120,9 +128,38 @@ class WorkerTest {
         assertThat(dbTask.getStatus()).isEqualTo(TaskStatus.DEAD);
         assertThat(dbTask.getAttempt()).isEqualTo(3);
         assertThat(dbTask.getError()).isEqualTo("boom");
+        assertThat(dbTask.getStackTrace()).contains("RuntimeException").contains("boom");
         verify(redisBroker).sendToDlq(dbTask);
         verify(redisBroker).acknowledge(polledTask);
         verify(redisBroker, never()).enqueueDelayed(any(Task.class));
+    }
+
+    @Test
+    void retriesTaskWhenHandlerTimesOut() {
+        queueProperties.getWorker().setHandlerTimeoutMs(10);
+        Task polledTask = task("log_message", 0, 3);
+        Task dbTask = taskWithId(polledTask.getId(), "log_message", 0, 3);
+        List<TaskStatus> savedStatuses = captureSavedStatuses();
+
+        when(redisBroker.poll("default")).thenReturn(polledTask);
+        when(taskRepository.findById(polledTask.getId())).thenReturn(Optional.of(dbTask));
+        when(handlerRegistry.get("log_message")).thenReturn(taskHandler);
+        when(taskHandler.handle(dbTask)).thenAnswer(invocation -> {
+            Thread.sleep(1000);
+            return "{\"ok\":true}";
+        });
+
+        worker.runOnce("default");
+
+        assertThat(savedStatuses).containsExactly(TaskStatus.RUNNING, TaskStatus.PENDING);
+        assertThat(dbTask.getStatus()).isEqualTo(TaskStatus.PENDING);
+        assertThat(dbTask.getAttempt()).isEqualTo(1);
+        assertThat(dbTask.getError()).isEqualTo("Handler timed out!");
+        assertThat(dbTask.getStackTrace()).contains("RuntimeException").contains("Handler timed out!");
+        assertThat(dbTask.getRunAt()).isNotNull();
+        verify(redisBroker).enqueueDelayed(dbTask);
+        verify(redisBroker).acknowledge(polledTask);
+        verify(redisBroker, never()).sendToDlq(any(Task.class));
     }
 
     private List<TaskStatus> captureSavedStatuses() {

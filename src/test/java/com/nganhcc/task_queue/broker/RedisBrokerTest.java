@@ -4,15 +4,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 
 import java.time.Instant;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 
 import com.nganhcc.task_queue.model.Task;
 
@@ -40,34 +43,28 @@ class RedisBrokerTest {
     @Test
     void pollMovesTaskFromQueueToProcessingQueue() {
         RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
-        ListOperations<String, String> listOperations = mock(ListOperations.class);
-        ZSetOperations<String, String> zSetOperations = mock(ZSetOperations.class);
-        ZSetOperations.TypedTuple<String> tuple = mock(ZSetOperations.TypedTuple.class);
         TaskSerializer taskSerializer = mock(TaskSerializer.class);
         RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
         Task task = new Task(null, "default", "send_email", "{}", 3, 0, null);
 
-        when(redisTemplate.opsForZSet()).thenReturn(zSetOperations);
-        when(redisTemplate.opsForList()).thenReturn(listOperations);
-        when(zSetOperations.popMin("taskqueue:default")).thenReturn(tuple);
-        when(tuple.getValue()).thenReturn("{\"id\":\"task-id\"}");
+        when(redisTemplate.execute(any(RedisScript.class), eq(List.of("taskqueue:default", "taskqueue:default:processing"))))
+                .thenReturn("{\"id\":\"task-id\"}");
         when(taskSerializer.deserialize("{\"id\":\"task-id\"}")).thenReturn(task);
 
         Task result = redisBroker.poll("default");
 
         assertThat(result).isSameAs(task);
-        verify(listOperations).leftPush("taskqueue:default:processing", "{\"id\":\"task-id\"}");
+        verify(redisTemplate).execute(any(RedisScript.class), eq(List.of("taskqueue:default", "taskqueue:default:processing")));
     }
 
     @Test
     void pollReturnsNullWhenQueueIsEmpty() {
         RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
-        ZSetOperations<String, String> zSetOperations = mock(ZSetOperations.class);
         TaskSerializer taskSerializer = mock(TaskSerializer.class);
         RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
 
-        when(redisTemplate.opsForZSet()).thenReturn(zSetOperations);
-        when(zSetOperations.popMin("taskqueue:default")).thenReturn(null);
+        when(redisTemplate.execute(any(RedisScript.class), eq(List.of("taskqueue:default", "taskqueue:default:processing"))))
+                .thenReturn(null);
 
         Task result = redisBroker.poll("default");
 
@@ -120,5 +117,48 @@ class RedisBrokerTest {
                 .hasMessage("Delayed task must have runAt");
 
         verifyNoInteractions(redisTemplate, taskSerializer);
+    }
+
+    @Test
+    void pollReadyDelayedReturnsReadyTaskFromLuaResult() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+        Task task = new Task(null, "default", "send_email", "{}", 3, 0, null);
+        Instant now = Instant.parse("2026-05-19T00:00:00Z");
+
+        when(redisTemplate.execute(
+                any(RedisScript.class),
+                eq(List.of("taskqueue:delayed")),
+                eq(String.valueOf(now.toEpochMilli()))))
+                .thenReturn("{\"id\":\"task-id\"}");
+        when(taskSerializer.deserialize("{\"id\":\"task-id\"}")).thenReturn(task);
+
+        Task result = redisBroker.pollReadyDelayed(now);
+
+        assertThat(result).isSameAs(task);
+        verify(redisTemplate).execute(
+                any(RedisScript.class),
+                eq(List.of("taskqueue:delayed")),
+                eq(String.valueOf(now.toEpochMilli())));
+    }
+
+    @Test
+    void pollReadyDelayedReturnsNullWhenNoDelayedTaskIsReady() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+        Instant now = Instant.parse("2026-05-19T00:00:00Z");
+
+        when(redisTemplate.execute(
+                any(RedisScript.class),
+                eq(List.of("taskqueue:delayed")),
+                eq(String.valueOf(now.toEpochMilli()))))
+                .thenReturn(null);
+
+        Task result = redisBroker.pollReadyDelayed(now);
+
+        assertThat(result).isNull();
+        verifyNoInteractions(taskSerializer);
     }
 }

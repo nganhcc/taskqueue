@@ -2,12 +2,10 @@ package com.nganhcc.task_queue.broker;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import com.nganhcc.task_queue.exception.TaskNotFoundException;
@@ -17,6 +15,25 @@ import com.nganhcc.task_queue.model.Task;
 public class RedisBroker {
     private final RedisTemplate<String, String> redisTemplate;
     private final TaskSerializer taskSerializer;
+    private static final RedisScript<String> POLL_SCRIPT = RedisScript.of("""
+        local task = redis.call('ZRANGE', KEYS[1], 0 ,0)[1]
+        if task == nil then
+            return nil
+        end
+        redis.call('ZREM', KEYS[1], task)
+        redis.call('LPUSH', KEYS[2], task)
+        return task
+    """, String.class);
+
+    private static final RedisScript<String> POLL_READY_DELAYED_SCRIPT = RedisScript.of("""
+        local tasks = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0 ,1)
+        local task = tasks[1]
+        if task == nil then
+            return nil
+        end
+        redis.call('ZREM', KEYS[1], task)
+        return task
+            """, String.class);
 
     public RedisBroker(RedisTemplate<String, String> redisTemplate, TaskSerializer taskSerializer){
         this.redisTemplate=redisTemplate;
@@ -32,12 +49,10 @@ public class RedisBroker {
     public Task poll(String queueName){
         String sourceKey= RedisKeys.queue(queueName);
         String destinationKey= RedisKeys.processing(queueName);
-        ZSetOperations.TypedTuple<String> tuple =redisTemplate.opsForZSet().popMin(sourceKey);
-        if (tuple == null || tuple.getValue() == null){
+        String json = redisTemplate.execute(POLL_SCRIPT,List.of(sourceKey,destinationKey));
+        if (json == null){
             return null;
         }
-        String json = tuple.getValue();
-        redisTemplate.opsForList().leftPush(destinationKey, json);
         return taskSerializer.deserialize(json);
     }
 
@@ -102,19 +117,18 @@ public class RedisBroker {
         return redisTemplate.opsForList().size(RedisKeys.dlq());
     }
 
-    public Set<Task> findReadyDelayedTasks(Instant now){
-        Set<String> jsonTasks= redisTemplate.opsForZSet().rangeByScore(RedisKeys.delayed(), 0, now.toEpochMilli());
-        if (jsonTasks==null || jsonTasks.isEmpty()){
-            return Set.of();
+    public Task pollReadyDelayed(Instant now){
+        String json = redisTemplate.execute(
+            POLL_READY_DELAYED_SCRIPT,
+            List.of(RedisKeys.delayed()),
+            String.valueOf(now.toEpochMilli())
+        );
+        if(json ==null){
+            return null;
         }
-        return jsonTasks.stream().map(taskSerializer::deserialize).collect(Collectors.toSet());
+        return taskSerializer.deserialize(json);
     }
 
-    public void removeDelayed(Task task){
-        String json = taskSerializer.serialize(task);
-        redisTemplate.opsForZSet().remove(RedisKeys.delayed(), json);
-    }
-    
     public void sendToDlq(Task task){
         String json = taskSerializer.serialize(task);
         redisTemplate.opsForList().leftPush(RedisKeys.dlq(), json);
