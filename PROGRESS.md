@@ -206,11 +206,7 @@ Priority behavior:
 
 - higher `Task.priority` should run first
 - same priority is ordered by `createdAt`
-- live poll uses `ZPOPMIN`, then pushes the task JSON into the processing list
-
-Important limitation:
-
-- `poll(...)` atomically removes from the live sorted set with `ZPOPMIN`, but the follow-up `LPUSH` into processing is a second Redis command. A crash between those two commands can lose a task from Redis. A future improvement should replace this with a Lua script that does pop-and-push atomically.
+- live poll uses a Redis Lua script to atomically move one task from the ready sorted set into the processing list
 
 ### Worker Runtime
 
@@ -303,6 +299,7 @@ Endpoints:
 ```http
 GET /dlq
 POST /dlq/{id}/replay
+POST /dlq/{id}/replay?resetAttempts=true
 ```
 
 Behavior:
@@ -311,7 +308,8 @@ Behavior:
 - worker pushes exhausted task JSON to `taskqueue:dlq`
 - `/dlq` lists current DLQ entries
 - replay removes the DLQ entry, loads the DB task, sets it to `PENDING`, clears failure fields, saves, and re-enqueues
-- replay currently keeps `attempt` unchanged
+- replay keeps `attempt` unchanged by default
+- replay with `resetAttempts=true` resets `attempt` to `0`
 
 ### Stuck Task Reaper
 
@@ -553,29 +551,16 @@ https://github.com/nganhcc/taskqueue/pull/new/feature-task-queue-backend
 
 ## Known Limitations / Next Improvements
 
-1. Redis poll should be upgraded to Lua.
-   - Current `ZPOPMIN` is atomic only for removing from the live sorted set.
-   - `LPUSH` to processing is a separate command.
-   - A Lua script should atomically pop from live queue and push into processing.
-
-2. Handler timeout is not implemented.
-   - A long-running handler can keep a task `RUNNING` until the reaper catches it.
-   - Add worker handler timeout config and execute handler through a timed future.
-
-3. Queue pause state is in memory.
+1. Queue pause state is in memory.
    - Restarting the app clears paused queues.
    - Persist pause state in Redis if operational persistence is needed.
 
-4. DLQ replay keeps attempt count unchanged.
-   - This is intentional for now.
-   - Add `resetAttempts=true` option if full retry-budget replay is needed.
-
-5. Purging delayed and DLQ queues only clears Redis.
+2. Purging delayed and DLQ queues only clears Redis.
    - Per-queue purge updates DB tasks, but delayed/DLQ purge does not update matching DB rows.
 
-6. Tests need broader coverage.
-   - Add focused tests for `DlqController`, `QueueController`, `MetricsController`, `DelayedTaskScheduler`, and `StuckTaskReaper`.
+3. Tests need broader coverage.
+   - Add focused tests for `QueueController`, `MetricsController`, `DelayedTaskScheduler`, and `StuckTaskReaper`.
    - Update smoke/full integration tests as the API stabilizes.
 
-7. `TaskType` currently exists but has no behavior.
+4. `TaskType` currently exists but has no behavior.
    - Remove it or turn it into a real enum/value object when handler typing needs it.

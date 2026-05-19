@@ -88,7 +88,7 @@ Every unit of work is a `Task` row in PostgreSQL.
 | `createdAt` | Creation timestamp |
 | `result` | Handler result JSON string |
 | `error` | Last failure/cancel/purge message |
-| `stackTrace` | Failure stack trace field, not currently populated by Worker |
+| `stackTrace` | Failure stack trace captured by Worker |
 
 Main lifecycle:
 
@@ -133,14 +133,8 @@ Members are serialized task JSON. Scores are calculated so higher priority
 comes first, and tasks with the same priority preserve older-first order by
 `createdAt`.
 
-Polling currently does:
-
-```text
-ZPOPMIN taskqueue:{queue}
-LPUSH   taskqueue:{queue}:processing <task_json>
-```
-
-This is not atomic across both commands. See "Known Reliability Gaps".
+Polling uses a Redis Lua script to atomically move one task from the ready
+sorted set into the processing list and return its serialized JSON.
 
 ### Processing Queues
 
@@ -176,7 +170,9 @@ taskqueue:dlq
 
 When retries are exhausted, the worker marks the DB task `DEAD` and pushes task
 JSON to this list. `/dlq` reads from Redis, and replay removes the Redis entry,
-loads the DB task, resets it to `PENDING`, and re-enqueues it.
+loads the DB task, resets it to `PENDING`, and re-enqueues it. Replay keeps the
+existing `attempt` count by default, or resets it to `0` with
+`resetAttempts=true`.
 
 ## Worker Runtime
 
@@ -395,15 +391,12 @@ taskqueue:
 
 These are the highest-value architecture improvements:
 
-1. Make ready poll plus processing push atomic with a Redis Lua script.
-2. Make delayed remove plus live enqueue atomic with a Redis Lua script.
-3. Add a distributed scheduler lock if multiple app instances are expected.
-4. Decide whether DLQ replay should reset `attempt` to `0`.
-5. Populate `stackTrace` on worker failures.
-6. Consider retry jitter and a max backoff cap.
-7. Decide whether stuck reaping should increment `attempt` or use retry/DLQ
+1. Make delayed remove plus live enqueue atomic with a Redis Lua script.
+2. Add a distributed scheduler lock if multiple app instances are expected.
+3. Consider retry jitter and a max backoff cap.
+4. Decide whether stuck reaping should increment `attempt` or use retry/DLQ
    logic instead of always re-enqueueing.
-8. Persist queue pause state if it must survive restarts.
+5. Persist queue pause state if it must survive restarts.
 
 ## Design Decisions
 
