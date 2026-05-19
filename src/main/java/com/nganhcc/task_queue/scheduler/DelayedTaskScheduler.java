@@ -1,7 +1,6 @@
 package com.nganhcc.task_queue.scheduler;
 
 import java.time.Instant;
-import java.util.Set;
 
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -24,10 +23,12 @@ public class DelayedTaskScheduler {
 
     @Scheduled(fixedDelayString = "${taskqueue.scheduler.poll-interval-ms:1000}")
     public void moveReadyTasks(){
-        Set<Task> readyTasks = redisBroker.findReadyDelayedTasks(Instant.now());
-        for (Task task: readyTasks){
-            redisBroker.removeDelayed(task);
-            Task dbTask = taskRepository.findById(task.getId()).orElse(null);
+        while (true){
+            Task delayedTask = redisBroker.pollReadyDelayed(Instant.now());
+            if (delayedTask == null){
+                return;
+            }
+            Task dbTask = taskRepository.findById(delayedTask.getId()).orElse(null);
             if (dbTask == null || dbTask.getStatus() != TaskStatus.PENDING){
                 continue;
             }
@@ -36,6 +37,4 @@ public class DelayedTaskScheduler {
             redisBroker.enqueue(saved);
         }
     }
-
-    
 }
