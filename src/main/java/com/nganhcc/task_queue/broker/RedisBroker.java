@@ -1,5 +1,6 @@
 package com.nganhcc.task_queue.broker;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -34,6 +35,13 @@ public class RedisBroker {
         redis.call('ZREM', KEYS[1], task)
         return task
             """, String.class);
+    
+    private static final RedisScript<Long> RELEASE_LOCK_SCRIPT = RedisScript.of("""
+        if redis.call('GET', KEYS[1]) == ARGV[1] then
+            return redis.call('DEL', KEYS[1])
+        end
+        return 0
+        """, Long.class);
 
     public RedisBroker(RedisTemplate<String, String> redisTemplate, TaskSerializer taskSerializer){
         this.redisTemplate=redisTemplate;
@@ -151,9 +159,20 @@ public class RedisBroker {
         redisTemplate.opsForList().remove(RedisKeys.dlq(), 1, json);
     }
 
+    public boolean acquireSchedulerLock(String token, Duration ttl){
+        Boolean acquired = redisTemplate.opsForValue()
+        .setIfAbsent(RedisKeys.schedulerLock(), token, ttl);
+        return Boolean.TRUE.equals(acquired);
+    }
+    public void releaseSchedulerLock(String token){
+        redisTemplate.execute(RELEASE_LOCK_SCRIPT,
+            List.of(RedisKeys.schedulerLock()),token
+        );
+    }
+
     private double priorityScore(Task task){
         long createdAtMillis = task.getCreatedAt().toEpochMilli();
         return (-task.getPriority() * 1_000_000_000_000_000D) + createdAtMillis;
     }
-
+    
 }

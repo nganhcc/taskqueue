@@ -57,6 +57,7 @@ taskqueue:
 
   scheduler:
     poll-interval-ms: 1000        
+    lock-ttl-ms: 10000
 
   reaper:
     stuck-threshold-minutes: 5   

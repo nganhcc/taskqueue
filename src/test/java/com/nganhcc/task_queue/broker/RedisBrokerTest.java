@@ -8,12 +8,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.RedisScript;
 
@@ -160,5 +162,52 @@ class RedisBrokerTest {
 
         assertThat(result).isNull();
         verifyNoInteractions(taskSerializer);
+    }
+
+    @Test
+    void acquireSchedulerLockUsesRedisSetIfAbsentWithTtl() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        ValueOperations<String, String> valueOperations = mock(ValueOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+        Duration ttl = Duration.ofSeconds(10);
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent("taskqueue:scheduler:lock", "token-1", ttl)).thenReturn(true);
+
+        boolean acquired = redisBroker.acquireSchedulerLock("token-1", ttl);
+
+        assertThat(acquired).isTrue();
+        verify(valueOperations).setIfAbsent("taskqueue:scheduler:lock", "token-1", ttl);
+    }
+
+    @Test
+    void acquireSchedulerLockReturnsFalseWhenRedisDoesNotAcquireLock() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        ValueOperations<String, String> valueOperations = mock(ValueOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+        Duration ttl = Duration.ofSeconds(10);
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent("taskqueue:scheduler:lock", "token-1", ttl)).thenReturn(false);
+
+        boolean acquired = redisBroker.acquireSchedulerLock("token-1", ttl);
+
+        assertThat(acquired).isFalse();
+    }
+
+    @Test
+    void releaseSchedulerLockUsesLuaScriptWithLockKeyAndTokenArgument() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        redisBroker.releaseSchedulerLock("token-1");
+
+        verify(redisTemplate).execute(
+                any(RedisScript.class),
+                eq(List.of("taskqueue:scheduler:lock")),
+                eq("token-1"));
     }
 }
