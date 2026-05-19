@@ -165,6 +165,7 @@ curl -i -X POST http://localhost:8080/queues/dlq/purge
 ```bash
 curl -i http://localhost:8080/dlq
 curl -i -X POST http://localhost:8080/dlq/{id}/replay
+curl -i -X POST 'http://localhost:8080/dlq/{id}/replay?resetAttempts=true'
 ```
 
 ### Metrics
@@ -285,9 +286,8 @@ src/main/java/com/nganhcc/task_queue/
 
 ## Known Limitations
 
-- Redis ready queue polling removes a task from the sorted set and then pushes it to the processing list in a second command. A future improvement should make this move atomic with Lua.
 - Queue pause state is in memory only and is cleared on application restart.
-- DLQ replay keeps the existing attempt count.
+- DLQ replay keeps the existing attempt count by default. Use `resetAttempts=true` to reset it during replay.
 - `TaskType` is currently a placeholder.
 
 ## More Documentation

@@ -192,23 +192,20 @@ taskqueue:scheduler:lock      # key helper exists, lock is not implemented yet
 
 Ready queues are sorted sets, not lists. `RedisBroker.enqueue` scores tasks so
 higher `priority` runs first, and older tasks of the same priority run first.
+`RedisBroker.poll` uses a Lua script to atomically move one task from the ready
+sorted set into the processing list.
 
 ## Known Limitations
 
 Keep these in mind when extending the system:
 
-- `RedisBroker.poll` uses `ZPOPMIN` and then `LPUSH` as two Redis commands. A
-  crash between them can remove a task from the ready queue before it reaches
-  the processing list. A Lua script should make this atomic.
 - Delayed promotion removes from `taskqueue:delayed` and then enqueues to the
   live queue as separate operations.
 - `RedisKeys.schedulerLock()` exists, but `DelayedTaskScheduler` does not use a
   distributed lock yet.
 - Queue pause state is in memory only and is lost on restart.
-- DLQ replay keeps the existing `attempt` count. Decide intentionally before
-  changing this behavior.
-- The worker stores the latest error message, but does not currently populate
-  full stack traces.
+- DLQ replay keeps the existing `attempt` count by default, and supports
+  `resetAttempts=true` to reset the count to `0`.
 - Handlers must be idempotent because delivery is at-least-once in design and
   duplicates are possible.
 
