@@ -76,11 +76,18 @@ public class QueueProperties {
     //Dinh nghia SchedulerConfig
     public static class SchedulerConfig{
         private long pollIntervalMs = 1000;
+        private long lockTtlMs = 10000;
         public long getPollIntervalMs(){
             return this.pollIntervalMs;
         }
         public void setPollIntervalMs(long pollIntervalMs){
             this.pollIntervalMs= pollIntervalMs;
+        }
+        public long getLockTtlMs(){
+            return this.lockTtlMs;
+        }
+        public void setLockTtlMs(long lockTtlMs){
+            this.lockTtlMs=lockTtlMs;
         }
     }
     //Dinh nghia ReaperConfig
