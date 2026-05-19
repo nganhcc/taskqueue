@@ -1,412 +1,420 @@
 # Architecture
 
+This document describes the architecture implemented in this repository today.
+Where the design still has reliability gaps, those gaps are called out
+explicitly so future agents can improve the right parts.
+
 ## Overview
 
-`taskqueue` is a distributed task queue built on Java 21 + Redis + PostgreSQL. Clients submit work via a REST API; background workers pick it up, execute it, and store results. Failed tasks are retried with exponential backoff and eventually moved to a dead letter queue if all retries are exhausted.
+`task-queue` is a Spring Boot backend for creating and executing background
+tasks. PostgreSQL stores durable task state. Redis stores live queue state.
+Workers poll Redis, execute registered Java handlers, and update PostgreSQL
+with status, result, and failure details.
 
-The system is designed around three guarantees:
+The system aims for:
 
-- **At-least-once delivery** — a task is never silently lost, even if a worker crashes mid-execution
-- **Ordered retry with backoff** — failed tasks are re-queued at increasing intervals with jitter to prevent thundering herd
-- **Inspectable failures** — dead tasks preserve their full error context and can be replayed without redeployment
+- Durable task records in PostgreSQL
+- Priority-aware live queues in Redis
+- Delayed execution through a Redis sorted set
+- Retry with exponential backoff
+- DLQ inspection and replay
+- Stuck task recovery after worker failures
 
----
+Delivery should be treated as at-least-once. Handlers must be idempotent.
 
-## Component map
+## Component Map
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Clients                                                        │
-│  POST /tasks  ─────────────────────────────────────────────┐   │
-│  GET  /tasks/{id}  ◄──────────────────────────────────┐    │   │
-└──────────────────────────────────────────────────────────────── ┘
-                                                         │    │
-                                              ResultStore│    │EnqueueController
-                                              (Postgres) │    │
-                                                         │    ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  Broker layer (Redis)                                            │
-│                                                                  │
-│   taskqueue:default  ──────────────────► WorkerPool (default)   │
-│   taskqueue:high_priority  ────────────► WorkerPool (high)      │
-│                                               │  │               │
-│   taskqueue:delayed (sorted set) ──► Scheduler│  │               │
-│                                               │  │               │
-│   taskqueue:dlq  ◄────────────── RetryEngine ◄──┘               │
-│                                       │                          │
-│   taskqueue:{q}:processing ◄──────────┘  (in-flight set)        │
-│                          ▲                                       │
-│                       Reaper (crash recovery)                    │
-└──────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Data model
-
-Every unit of work is a `Task`. It is the only entity that flows through the entire system.
-
-| Field | Type | Description |
-|---|---|---|
-| `id` | UUID | Immutable, assigned at enqueue time |
-| `queue` | String | Which queue this task belongs to (`default`, `high_priority`, etc.) |
-| `fn` | String | Handler name — maps to a registered `TaskHandler` |
-| `payload` | JSON | Arguments passed to the handler |
-| `status` | Enum | `PENDING → RUNNING → DONE / FAILED / DEAD` |
-| `attempt` | int | Current attempt number, starts at 0 |
-| `max_retries` | int | Max attempts before moving to DLQ |
-| `run_at` | Instant | Earliest time the task should execute (used for delayed tasks) |
-| `started_at` | Instant | When a worker last picked this task up |
-| `created_at` | Instant | When the task was first enqueued |
-| `result` | String | JSON result from the handler on success |
-| `error` | String | Exception message on failure |
-| `stack_trace` | String | Full stacktrace on failure, preserved in DLQ |
-
-### Task lifecycle
-
-```
-                    ┌─────────────────────────────────────┐
-  POST /tasks       │                                     │
-       │            ▼                                     │
-       └──► PENDING ──► [worker picks up] ──► RUNNING     │
-                                                 │        │
-                                    success ─────┤        │
-                                                 ▼        │
-                                               DONE       │
-                                                          │
-                                    failure ──► attempt++ │
-                                                 │        │
-                              attempt < max ─────┤        │
-                                                 ▼        │
-                                            PENDING (delayed, re-queued)
-                                                          │
-                              attempt == max ─────────────┘
-                                                 │
-                                                 ▼
-                                               DEAD (moved to DLQ)
+```text
+Clients
+  |
+  | HTTP
+  v
+api controllers
+  |  TaskController / QueueController / DlqController / MetricsController
+  v
+services
+  |  TaskService / QueueControllerService
+  v
+PostgreSQL <------------------------- workers ----------------------+
+  | tasks table                         |                           |
+  |                                     v                           |
+  +------------------------------ RedisBroker ----------------------+
+                                        |
+                                        v
+Redis keys:
+  taskqueue:{queue}             ready queue sorted set
+  taskqueue:{queue}:processing  in-flight task list
+  taskqueue:delayed             delayed task sorted set
+  taskqueue:dlq                 dead letter queue list
 ```
 
----
+Scheduled components:
 
-## Broker
+- `WorkerBootstrap` submits virtual-thread workers for each configured queue.
+- `DelayedTaskScheduler` moves ready delayed tasks back to live queues.
+- `StuckTaskReaper` finds old `RUNNING` DB tasks and re-enqueues them.
 
-The broker is the only component that talks directly to Redis. Everything else goes through it.
+## Package Responsibilities
 
-### Queue implementation
-
-Each named queue is a Redis **list**. Producers call `LPUSH`, workers call `RPOPLPUSH` (right-to-left = FIFO).
-
-```
-LPUSH taskqueue:default  <task_json>     # enqueue
-RPOPLPUSH taskqueue:default taskqueue:default:processing  # worker pops atomically
-```
-
-`RPOPLPUSH` is the key operation for at-least-once delivery — see [Crash recovery](#crash-recovery) below.
-
-### Delayed tasks
-
-Tasks with a future `run_at` go into a Redis **sorted set** scored by Unix timestamp:
-
-```
-ZADD taskqueue:delayed <unix_ms> <task_json>
+```text
+api/        HTTP endpoints, API DTO conversion, exception mapping
+broker/     Redis operations, Redis key names, task JSON serialization
+config/     queue properties and Redis template configuration
+model/      JPA task entity and status enum
+reaper/     recovery of stale RUNNING tasks
+retry/      retry decision and backoff calculation
+scheduler/  delayed task promotion
+service/    task creation, lookup, cancel, retry, queue state operations
+store/      Spring Data JPA repositories
+worker/     task handlers, handler lookup, worker loop, worker scheduling
 ```
 
-The Scheduler wakes every second and moves ready tasks into their target queue:
+## Task Model
 
-```
-ZRANGEBYSCORE taskqueue:delayed 0 <now_ms>   # find ready tasks
-ZREM + LPUSH (in a Lua script)               # atomic move to queue
-```
+Every unit of work is a `Task` row in PostgreSQL.
 
-The Lua script makes the pop-and-push atomic — without it, a crash between `ZREM` and `LPUSH` would silently drop a task.
+| Field | Purpose |
+| --- | --- |
+| `id` | Task UUID |
+| `queue` | Queue name, such as `default` or `high_priority` |
+| `fn` | Handler name matched against `TaskHandler.fn()` |
+| `payload` | JSON payload stored as text |
+| `status` | `PENDING`, `RUNNING`, `DONE`, `FAILED`, or `DEAD` |
+| `attempt` | Number of failed execution attempts |
+| `maxRetries` | Retry limit for this task |
+| `priority` | Higher values run earlier within a queue |
+| `runAt` | Earliest execution time for delayed/retry tasks |
+| `startedAt` | Last time a worker started this task |
+| `createdAt` | Creation timestamp |
+| `result` | Handler result JSON string |
+| `error` | Last failure/cancel/purge message |
+| `stackTrace` | Failure stack trace field, not currently populated by Worker |
 
----
+Main lifecycle:
 
-## Worker pool
-
-Each queue has its own `WorkerPool` — a fixed set of workers polling that queue concurrently. Pool sizes are configured per queue in `application.yml`.
-
-### Worker loop
-
-```
-while running:
-    task = broker.poll(queue, timeout=5s)   // RPOPLPUSH — blocks up to 5s
-    if task == null: continue               // timeout, nothing in queue
-
-    task.status = RUNNING
-    task.startedAt = now()
-    repo.save(task)
-
-    try:
-        handler = registry.find(task.fn)
-        result = handler.handle(task)
-        task.status = DONE
-        task.result = result
-    catch Exception e:
-        retryEngine.handleFailure(task, e)
-    finally:
-        repo.save(task)
-        broker.acknowledge(task)            // remove from :processing set
+```text
+PENDING -> RUNNING -> DONE
+PENDING -> RUNNING -> PENDING   retry scheduled with future runAt
+PENDING -> RUNNING -> DEAD      retries exhausted and copied to DLQ
+PENDING/RUNNING -> FAILED       cancel, manual purge, or administrative failure
+DEAD -> PENDING                 DLQ replay
+FAILED -> PENDING               manual task retry
 ```
 
-### Java 21 virtual threads
+## Enqueue Flow
 
-Each worker runs in a virtual thread via `Executors.newVirtualThreadPerTaskExecutor()`. The JVM multiplexes thousands of virtual threads onto a small number of OS threads — blocking Redis polls don't waste OS thread resources.
+`POST /tasks` calls `TaskService.enqueue`.
 
-This means pool sizes can be set much higher than with traditional thread pools before hitting OS limits.
+1. Validate the request body, queue, handler name, payload, and retry count.
+2. Default a missing/blank queue to `default`.
+3. Default `maxRetries` from the queue configuration.
+4. Default `priority` to `0`.
+5. Serialize payload with Jackson 3 `JsonMapper`.
+6. Save a `PENDING` task in PostgreSQL.
+7. If `runAt` is absent or due, enqueue to the live Redis queue.
+8. If `runAt` is in the future, enqueue to `taskqueue:delayed`.
 
----
+Unknown queues are rejected before a DB row is created.
 
-## Crash recovery
+## Redis Broker
 
-This is the core mechanism that makes delivery reliable.
+`RedisBroker` is the only application component that should directly manipulate
+queue keys.
 
-### The problem
+### Ready Queues
 
-If a worker picks up a task and crashes before finishing, the task disappears from the queue but never completes. Standard `RPOP` has no recovery path.
+Each live queue is a Redis sorted set:
 
-### The solution: processing set + reaper
+```text
+taskqueue:{queue}
+```
 
-`RPOPLPUSH` atomically moves the task from the queue into a separate `taskqueue:{queue}:processing` set in one Redis operation. Two outcomes:
+Members are serialized task JSON. Scores are calculated so higher priority
+comes first, and tasks with the same priority preserve older-first order by
+`createdAt`.
 
-- **Worker succeeds or retries normally** → worker calls `LREM` to remove the task from `:processing`
-- **Worker crashes** → task remains in `:processing` forever
+Polling currently does:
 
-The `Reaper` runs every 30 seconds and finds tasks stuck in `:processing` for longer than the stuck threshold (default 5 minutes):
+```text
+ZPOPMIN taskqueue:{queue}
+LPUSH   taskqueue:{queue}:processing <task_json>
+```
 
-```java
-@Scheduled(fixedDelay = 30_000)
-void reclaimStaleTasks() {
-    Instant cutoff = Instant.now().minus(stuckThreshold);
-    // find all tasks in :processing where startedAt < cutoff
-    // hand each one to retryEngine.handleFailure(task, new WorkerCrashException())
+This is not atomic across both commands. See "Known Reliability Gaps".
+
+### Processing Queues
+
+Each queue has an in-flight Redis list:
+
+```text
+taskqueue:{queue}:processing
+```
+
+When a worker finishes, `RedisBroker.acknowledge` removes the originally polled
+JSON from this list. Stale entries can later be removed by task id.
+
+### Delayed Queue
+
+Delayed and retry tasks are stored in:
+
+```text
+taskqueue:delayed
+```
+
+This is a sorted set scored by `runAt.toEpochMilli()`. The scheduler finds
+entries with score less than or equal to now, removes them from delayed storage,
+loads the DB task, verifies it is still `PENDING`, clears `runAt`, and re-enqueues
+it to the live priority queue.
+
+### Dead Letter Queue
+
+The DLQ is a Redis list:
+
+```text
+taskqueue:dlq
+```
+
+When retries are exhausted, the worker marks the DB task `DEAD` and pushes task
+JSON to this list. `/dlq` reads from Redis, and replay removes the Redis entry,
+loads the DB task, resets it to `PENDING`, and re-enqueues it.
+
+## Worker Runtime
+
+`WorkerBootstrap` is scheduled by:
+
+```yaml
+taskqueue.worker.poll-interval-ms
+```
+
+On each tick it:
+
+1. Iterates configured queues from `QueueProperties`.
+2. Skips queues paused by `QueueControllerService`.
+3. Submits `queue.concurrency` calls to `Worker.runOnce(queue)`.
+4. Runs those calls on `Executors.newVirtualThreadPerTaskExecutor()`.
+5. Uses an `AtomicBoolean` guard to avoid overlapping submit batches.
+
+`Worker.runOnce`:
+
+1. Polls a task from Redis.
+2. Loads the authoritative DB task by id.
+3. If the DB task is not `PENDING`, acknowledges the Redis processing entry and
+   exits.
+4. Marks the DB task `RUNNING` and sets `startedAt`.
+5. Looks up a handler by `fn`.
+6. Executes `TaskHandler.handle(task)`.
+7. On success, marks the task `DONE` and stores the result.
+8. On failure, increments `attempt`, stores the error, and either schedules a
+   retry or marks `DEAD` and sends to DLQ.
+9. Acknowledges the originally polled processing entry.
+
+## Retry
+
+`RetryPolicy.shouldRetry(task)` returns true while:
+
+```text
+task.attempt < task.maxRetries
+```
+
+Delay calculation is exponential:
+
+```text
+baseDelayMs * 2^attempt
+```
+
+There is no jitter or max-delay cap yet.
+
+When retrying, the worker sets:
+
+- `status = PENDING`
+- `runAt = now + delay`
+
+Then it saves the DB task and enqueues it into `taskqueue:delayed`.
+
+## Scheduler
+
+`DelayedTaskScheduler` is scheduled by:
+
+```yaml
+taskqueue.scheduler.poll-interval-ms
+```
+
+It promotes ready delayed tasks by reading `taskqueue:delayed` for scores up to
+now. Each candidate is removed from the delayed set, checked against PostgreSQL,
+and only re-enqueued if the DB task still exists and is still `PENDING`.
+
+`RedisKeys.schedulerLock()` exists, but no distributed scheduler lock is
+currently used.
+
+## Stuck Task Reaper
+
+`StuckTaskReaper` is scheduled by:
+
+```yaml
+taskqueue.reaper.poll-interval-ms
+```
+
+It uses:
+
+```yaml
+taskqueue.reaper.stuck-threshold-minutes
+```
+
+The reaper finds `RUNNING` tasks with old `startedAt`, removes matching
+processing Redis entries by task id, resets the task to `PENDING`, clears
+`startedAt`, saves it, and re-enqueues it.
+
+Current behavior re-enqueues stale tasks directly. It does not increment
+`attempt` or route through DLQ exhaustion logic.
+
+## Queue Controls
+
+`QueueController` exposes operational endpoints:
+
+```http
+GET /queues
+POST /queues/{queue}/pause
+POST /queues/{queue}/resume
+POST /queues/{queue}/run-once
+POST /queues/{queue}/purge
+POST /queues/delayed/purge
+POST /queues/dlq/purge
+```
+
+Pause state is stored in memory in `QueueControllerService`. It is not persisted
+and resets on application restart.
+
+Purging a named queue deletes ready and processing Redis keys and marks matching
+`PENDING` or `RUNNING` PostgreSQL tasks as `FAILED` with error `Queue purged`.
+
+## Metrics
+
+Implemented metrics endpoints are JSON API endpoints, not custom Micrometer
+meters:
+
+```http
+GET /metrics/tasks
+GET /metrics/queues
+```
+
+Task metrics count PostgreSQL tasks by status. Queue metrics report Redis ready
+and processing depths per configured queue, plus delayed and DLQ depths.
+
+Spring Actuator is configured to expose `health`, `info`, `metrics`, and
+`prometheus`.
+
+## API Reference
+
+```http
+POST /tasks
+GET /tasks
+GET /tasks?queue={queue}
+GET /tasks?status={status}
+GET /tasks?queue={queue}&status={status}
+GET /tasks/{id}
+POST /tasks/{id}/cancel
+POST /tasks/{id}/retry
+
+GET /dlq
+POST /dlq/{id}/replay
+
+GET /queues
+POST /queues/{queue}/pause
+POST /queues/{queue}/resume
+POST /queues/{queue}/run-once
+POST /queues/{queue}/purge
+POST /queues/delayed/purge
+POST /queues/dlq/purge
+
+GET /metrics/tasks
+GET /metrics/queues
+```
+
+Example enqueue request:
+
+```json
+{
+  "queue": "default",
+  "fn": "log_message",
+  "payload": {
+    "message": "hello"
+  },
+  "runAt": null,
+  "maxRetries": 3,
+  "priority": 5
 }
 ```
 
-From the retry engine's perspective, a crashed worker looks identical to a handler exception — the task goes through normal retry/DLQ logic.
+## Database Schema
 
----
+The schema is managed by Flyway migrations:
 
-## Retry engine
-
-Called whenever a handler throws an exception or a worker crash is detected.
-
-### Backoff formula
-
-```java
-long delay = baseDelayMs * (1L << attempt)           // exponential: 1s, 2s, 4s, 8s...
-           + ThreadLocalRandom.current().nextLong(0, 1000);  // jitter: 0–1000ms
-delay = Math.min(delay, MAX_DELAY_MS);               // cap at 60s
+```text
+V1__create_tasks.sql
+V2__add_task_priority.sql
 ```
 
-The jitter prevents **thundering herd**: if 500 tasks all fail simultaneously and retry at exactly the same interval, they all hammer the downstream service again at once. Random jitter spreads them out.
+`tasks` has indexes for status, queue/status, pending `run_at`, running
+`started_at`, and queue/status/priority/created order.
 
-### Decision logic
+JPA runs with:
 
-```
-attempt++
-if attempt < max_retries:
-    task.status = PENDING
-    task.run_at = now + delay
-    broker.enqueueDelayed(task)    // ZADD into sorted set
-else:
-    task.status = DEAD
-    broker.sendToDLQ(task)         // LPUSH into taskqueue:dlq
+```yaml
+spring.jpa.hibernate.ddl-auto: validate
 ```
 
-### Retry configuration
+Any schema change needs a new migration and matching entity update.
 
-Each queue has its own retry policy in `application.yml`:
+## Configuration
+
+Queue configuration lives under `taskqueue`:
 
 ```yaml
 taskqueue:
   queues:
-    default:
-      max_retries: 3
-      base_delay_ms: 1000
     high_priority:
-      max_retries: 5
-      base_delay_ms: 500
+      concurrency: 10
+      max-retries: 5
+      base-delay-ms: 500
+    default:
+      concurrency: 4
+      max-retries: 3
+      base-delay-ms: 1000
+  worker:
+    poll-interval-ms: 1000
+  scheduler:
+    poll-interval-ms: 1000
+  reaper:
+    stuck-threshold-minutes: 5
+    poll-interval-ms: 30000
 ```
 
----
+`QueueProperties` binds this to Java camelCase fields.
 
-## Dead letter queue
+## Known Reliability Gaps
 
-The DLQ is a Redis list (`taskqueue:dlq`). Tasks land here when all retries are exhausted.
+These are the highest-value architecture improvements:
 
-Every dead task retains:
-- Full error message and stack trace from the last failure
-- Attempt count and history
-- Original payload — exactly as submitted
+1. Make ready poll plus processing push atomic with a Redis Lua script.
+2. Make delayed remove plus live enqueue atomic with a Redis Lua script.
+3. Add a distributed scheduler lock if multiple app instances are expected.
+4. Decide whether DLQ replay should reset `attempt` to `0`.
+5. Populate `stackTrace` on worker failures.
+6. Consider retry jitter and a max backoff cap.
+7. Decide whether stuck reaping should increment `attempt` or use retry/DLQ
+   logic instead of always re-enqueueing.
+8. Persist queue pause state if it must survive restarts.
 
-### Replay
+## Design Decisions
 
-`POST /dlq/{taskId}/replay` resets the task to `attempt=0`, `status=PENDING`, and pushes it back into its original queue. It goes through the full worker → retry cycle again from scratch.
+PostgreSQL stores the durable record because tasks need queryable status,
+history, result, and error state. Redis stores live broker state because it is a
+good fit for fast priority queues, delayed sets, and short-lived operational
+lists.
 
-This is intentional: replay is for after you've fixed the bug. The task runs exactly as if it were freshly enqueued.
+The worker model uses Java 21 virtual threads instead of a reactive stack. This
+keeps handler and broker code straightforward while still allowing many blocking
+poll/execute operations.
 
----
-
-## Scheduler
-
-Responsible for moving delayed tasks into the live queue when their `run_at` time arrives.
-
-```java
-@Scheduled(fixedDelay = 1_000)
-void tick() {
-    if (!acquireLock()) return;        // only one instance runs at a time
-    try {
-        broker.flushReadyDelayedTasks();   // ZRANGEBYSCORE + atomic move via Lua
-    } finally {
-        releaseLock();
-    }
-}
-```
-
-### Distributed lock
-
-When running multiple app instances (e.g. for high availability), both Schedulers would otherwise pop the same delayed tasks simultaneously — causing duplicate executions.
-
-The lock uses Redis `SETNX` with a 5-second TTL:
-
-```
-SETNX taskqueue:scheduler:lock <instance_id>  EX 5
-```
-
-Only the instance that wins the `SETNX` runs the tick. The TTL ensures the lock is released even if the winning instance crashes mid-tick.
-
----
-
-## Result store
-
-Task results and status are persisted to PostgreSQL via Spring Data JPA. Redis holds the live queue state; Postgres holds the durable record.
-
-This separation means:
-- Redis can be flushed without losing task history
-- You can query task history with SQL (filter by status, queue, time range)
-- The dashboard reads from Postgres, not Redis, so it doesn't add load to the broker
-
-### Schema
-
-```sql
-CREATE TABLE tasks (
-    id            UUID PRIMARY KEY,
-    queue         VARCHAR(100) NOT NULL,
-    fn            VARCHAR(200) NOT NULL,
-    payload       TEXT NOT NULL,
-    status        VARCHAR(20) NOT NULL,
-    attempt       INT NOT NULL DEFAULT 0,
-    max_retries   INT NOT NULL DEFAULT 3,
-    run_at        TIMESTAMPTZ,
-    started_at    TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL,
-    result        TEXT,
-    error         TEXT,
-    stack_trace   TEXT
-);
-
-CREATE INDEX idx_tasks_status  ON tasks(status);
-CREATE INDEX idx_tasks_queue   ON tasks(queue, status);
-CREATE INDEX idx_tasks_run_at  ON tasks(run_at) WHERE status = 'PENDING';
-```
-
----
-
-## API reference
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/tasks` | Enqueue a task. Returns `task_id` immediately. |
-| `GET` | `/tasks/{id}` | Get task status and result. |
-| `GET` | `/tasks?queue=X&status=Y` | List tasks with filters. |
-| `GET` | `/dlq` | List all dead tasks. |
-| `POST` | `/dlq/{id}/replay` | Re-enqueue a dead task from scratch. |
-| `DELETE` | `/dlq/{id}` | Permanently discard a dead task. |
-| `GET` | `/metrics/queues` | Queue depths and throughput (for dashboard). |
-| `GET` | `/actuator/prometheus` | Prometheus metrics endpoint. |
-
-### Enqueue request
-
-```json
-POST /tasks
-{
-  "queue": "default",
-  "fn": "send_email",
-  "payload": { "to": "user@example.com", "subject": "Hello" },
-  "run_at": "2026-05-13T12:00:00Z",   // optional — omit for immediate
-  "max_retries": 3                     // optional — uses queue default
-}
-```
-
-### Task response
-
-```json
-{
-  "id": "9f3a1b2c-...",
-  "queue": "default",
-  "fn": "send_email",
-  "status": "DONE",
-  "attempt": 1,
-  "createdAt": "2026-05-13T10:00:00Z",
-  "startedAt": "2026-05-13T10:00:01Z",
-  "result": "{ \"messageId\": \"msg-882\" }",
-  "error": null
-}
-```
-
----
-
-## Observability
-
-### Metrics (Micrometer → Prometheus)
-
-| Metric | Type | Tags |
-|---|---|---|
-| `taskqueue.depth` | Gauge | `queue` |
-| `taskqueue.dlq.size` | Gauge | — |
-| `taskqueue.tasks.completed` | Counter | `queue`, `fn` |
-| `taskqueue.tasks.failed` | Counter | `queue`, `fn` |
-| `taskqueue.task.duration` | Timer | `queue`, `fn` |
-| `taskqueue.workers.active` | Gauge | `queue` |
-
-### Structured logging
-
-Every log line inside a worker includes the task ID via MDC:
-
-```
-2026-05-13T10:00:01Z INFO  Worker [taskId=9f3a1b2c queue=default fn=send_email attempt=1] executing handler
-2026-05-13T10:00:02Z INFO  Worker [taskId=9f3a1b2c queue=default fn=send_email attempt=1] completed in 834ms
-```
-
-This makes it trivial to trace a single task's journey across log lines without a tracing system.
-
----
-
-## Failure modes and mitigations
-
-| Failure | What happens | Mitigation |
-|---|---|---|
-| Worker crashes mid-task | Task stuck in `:processing` | Reaper rescues after 5 min |
-| Redis goes down | Workers stop polling; app still accepts enqueues (buffered) | Redis restart restores queue state from AOF/RDB |
-| Postgres goes down | Results not written; workers continue executing | Tasks re-execute on restart (at-least-once); idempotent handlers recommended |
-| Scheduler crashes mid-tick | Lock TTL expires in 5s; next instance acquires lock | No duplicate execution |
-| All retries exhausted | Task moves to DLQ | Operator inspects and replays after fix |
-| Thundering herd on retry | All failed tasks retry simultaneously | Jitter in backoff formula spreads retries |
-| Two Schedulers running | Both try to move delayed tasks | SETNX lock ensures only one wins |
-
----
-
-## Design decisions
-
-**Why Redis for the queue, not Postgres?**
-Redis `BRPOP`/`RPOPLPUSH` are O(1) and designed for this exact pattern. Polling a Postgres table with `SELECT FOR UPDATE SKIP LOCKED` works but adds write amplification and requires tuning. Redis gives lower latency and simpler queue semantics. Postgres is used for what it's good at: durable storage and queryable history.
-
-**Why not Kafka?**
-Kafka is the right choice at high scale (millions of tasks/sec, multiple consumer groups, replay from offset). For a portfolio project and most real workloads under 10k tasks/sec, Redis is simpler to operate and reason about. The architecture is designed so the broker interface (`RedisBroker`) can be swapped for a Kafka implementation without touching worker or retry logic.
-
-**Why Java 21 virtual threads over a reactive framework?**
-Reactive code (WebFlux, Project Reactor) is harder to read and debug. Virtual threads give the same throughput for I/O-bound workloads with blocking-style code that's straightforward to follow. This is the explicit recommendation from the Java team for most server workloads.
-
-**Why at-least-once instead of exactly-once?**
-Exactly-once delivery requires distributed transactions across Redis and Postgres, which adds significant complexity and latency. At-least-once with idempotent handlers is simpler, more performant, and sufficient for most task types. Handlers that must not run twice (e.g. charge a credit card) should implement idempotency using the task ID.
+The architecture does not promise exactly-once execution. Idempotency belongs in
+task handlers or downstream systems, usually keyed by `Task.id`.
