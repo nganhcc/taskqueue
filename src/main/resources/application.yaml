@@ -53,6 +53,7 @@ taskqueue:
       base-delay-ms: 1000
   worker:
     poll-interval-ms: 1000
+    handler-timeout-ms: 30000
 
   scheduler:
     poll-interval-ms: 1000        

@@ -12,6 +12,7 @@ public class QueueProperties {
     private Map<String, QueueConfig> queues = new HashMap<>();
     private SchedulerConfig scheduler = new SchedulerConfig();
     private ReaperConfig reaper = new ReaperConfig();
+    private WorkerConfig worker = new WorkerConfig();
 
     public Map<String,QueueConfig> getQueues(){
         return this.queues;
@@ -20,6 +21,9 @@ public class QueueProperties {
         this.queues=queues;
     }
 
+    public WorkerConfig getWorker(){
+        return this.worker;
+    }
     public SchedulerConfig getScheduler(){
         return this.scheduler;
     }
@@ -56,6 +60,17 @@ public class QueueProperties {
         }
         public void setBaseDelayMs(long baseDelayMs){
             this.baseDelayMs= baseDelayMs;
+        }
+    }
+
+    //WorkerConfig
+    public static class WorkerConfig{
+        private long handlerTimeoutMs= 30000;
+        public long getHandlerTimeoutMs(){
+            return this.handlerTimeoutMs;
+        }
+        public void setHandlerTimeoutMs(long handlerTimeoutMs){
+            this.handlerTimeoutMs=handlerTimeoutMs;
         }
     }
     //Dinh nghia SchedulerConfig
