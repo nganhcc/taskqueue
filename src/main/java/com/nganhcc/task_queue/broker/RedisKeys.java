@@ -21,4 +21,8 @@ public final class RedisKeys {
     public static String schedulerLock(){
         return "taskqueue:scheduler:lock";
     }
+
+    public static String pausedQueues(){
+        return "taskqueue:queues:paused";
+    }
 }
