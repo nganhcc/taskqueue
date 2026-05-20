@@ -1,15 +1,15 @@
 # Architecture
 
 This document describes the architecture implemented in this repository today.
-Where the design still has reliability gaps, those gaps are called out
-explicitly so future agents can improve the right parts.
+Where reliability gaps remain, those gaps are called out explicitly so future
+work can improve the right parts.
 
 ## Overview
 
 `task-queue` is a Spring Boot backend for creating and executing background
 tasks. PostgreSQL stores durable task state. Redis stores live queue state.
-Workers poll Redis, execute registered Java handlers, and update PostgreSQL
-with status, result, and failure details.
+Workers poll Redis, execute registered Java handlers, and update PostgreSQL with
+status, result, and failure details.
 
 The system aims for:
 
@@ -18,6 +18,7 @@ The system aims for:
 - Delayed execution through a Redis sorted set
 - Retry with exponential backoff
 - DLQ inspection and replay
+- Operational queue controls
 - Stuck task recovery after worker failures
 
 Delivery should be treated as at-least-once. Handlers must be idempotent.
@@ -46,12 +47,14 @@ Redis keys:
   taskqueue:{queue}:processing  in-flight task list
   taskqueue:delayed             delayed task sorted set
   taskqueue:dlq                 dead letter queue list
+  taskqueue:scheduler:lock      delayed scheduler lock
+  taskqueue:queues:paused       paused queue names set
 ```
 
 Scheduled components:
 
 - `WorkerBootstrap` submits virtual-thread workers for each configured queue.
-- `DelayedTaskScheduler` moves ready delayed tasks back to live queues.
+- `DelayedTaskScheduler` promotes ready delayed tasks while holding a Redis lock.
 - `StuckTaskReaper` finds old `RUNNING` DB tasks and re-enqueues them.
 
 ## Package Responsibilities
@@ -88,7 +91,7 @@ Every unit of work is a `Task` row in PostgreSQL.
 | `createdAt` | Creation timestamp |
 | `result` | Handler result JSON string |
 | `error` | Last failure/cancel/purge message |
-| `stackTrace` | Failure stack trace captured by Worker |
+| `stackTrace` | Failure stack trace captured by `Worker` |
 
 Main lifecycle:
 
@@ -155,10 +158,10 @@ Delayed and retry tasks are stored in:
 taskqueue:delayed
 ```
 
-This is a sorted set scored by `runAt.toEpochMilli()`. The scheduler finds
-entries with score less than or equal to now, removes them from delayed storage,
-loads the DB task, verifies it is still `PENDING`, clears `runAt`, and re-enqueues
-it to the live priority queue.
+This is a sorted set scored by `runAt.toEpochMilli()`. The scheduler calls a Lua
+script that atomically finds and removes one due delayed entry. Java then loads
+the DB task, verifies it still exists and is still `PENDING`, clears `runAt`,
+saves it, and re-enqueues it to the live priority queue.
 
 ### Dead Letter Queue
 
@@ -170,9 +173,33 @@ taskqueue:dlq
 
 When retries are exhausted, the worker marks the DB task `DEAD` and pushes task
 JSON to this list. `/dlq` reads from Redis, and replay removes the Redis entry,
-loads the DB task, resets it to `PENDING`, and re-enqueues it. Replay keeps the
-existing `attempt` count by default, or resets it to `0` with
-`resetAttempts=true`.
+loads the DB task, resets it to `PENDING`, clears failure fields, and re-enqueues
+it. Replay keeps the existing `attempt` count by default, or resets it to `0`
+with `resetAttempts=true`.
+
+### Scheduler Lock
+
+The delayed scheduler lock uses:
+
+```text
+taskqueue:scheduler:lock
+```
+
+`RedisBroker.acquireSchedulerLock` uses Redis `SET NX` with a TTL. Lock release
+uses a Lua script that deletes the key only if the stored token matches the
+caller token. This prevents a slow scheduler instance from deleting another
+instance's newer lock.
+
+### Paused Queue State
+
+Paused queues are stored in a Redis set:
+
+```text
+taskqueue:queues:paused
+```
+
+`QueueControllerService` delegates pause/resume/isPaused/list operations to
+`RedisBroker`, so pause state survives application restarts.
 
 ## Worker Runtime
 
@@ -198,11 +225,11 @@ On each tick it:
    exits.
 4. Marks the DB task `RUNNING` and sets `startedAt`.
 5. Looks up a handler by `fn`.
-6. Executes `TaskHandler.handle(task)`.
+6. Executes `TaskHandler.handle(task)` through a timed future.
 7. On success, marks the task `DONE` and stores the result.
-8. On failure, increments `attempt`, stores the error, and either schedules a
-   retry or marks `DEAD` and sends to DLQ.
-9. Acknowledges the originally polled processing entry.
+8. On failure or timeout, increments `attempt`, stores error and stack trace,
+   and either schedules a retry or marks `DEAD` and sends to DLQ.
+9. Acknowledges the originally polled processing entry in `finally`.
 
 ## Retry
 
@@ -235,12 +262,15 @@ Then it saves the DB task and enqueues it into `taskqueue:delayed`.
 taskqueue.scheduler.poll-interval-ms
 ```
 
-It promotes ready delayed tasks by reading `taskqueue:delayed` for scores up to
-now. Each candidate is removed from the delayed set, checked against PostgreSQL,
-and only re-enqueued if the DB task still exists and is still `PENDING`.
+It first tries to acquire `taskqueue:scheduler:lock` with TTL configured by:
 
-`RedisKeys.schedulerLock()` exists, but no distributed scheduler lock is
-currently used.
+```yaml
+taskqueue.scheduler.lock-ttl-ms
+```
+
+If the lock is unavailable, the scheduler does nothing for that tick. If the
+lock is acquired, it promotes ready delayed tasks until no due delayed task is
+returned. The lock is released in `finally`.
 
 ## Stuck Task Reaper
 
@@ -277,11 +307,16 @@ POST /queues/delayed/purge
 POST /queues/dlq/purge
 ```
 
-Pause state is stored in memory in `QueueControllerService`. It is not persisted
-and resets on application restart.
+Pause state is stored in Redis under `taskqueue:queues:paused`.
 
 Purging a named queue deletes ready and processing Redis keys and marks matching
 `PENDING` or `RUNNING` PostgreSQL tasks as `FAILED` with error `Queue purged`.
+
+Purging delayed deletes `taskqueue:delayed` and marks pending delayed DB tasks
+as `FAILED` with error `Delayed queue purged`.
+
+Purging DLQ deletes `taskqueue:dlq` and marks `DEAD` DB tasks as `FAILED` with
+error `DLQ purged`.
 
 ## Metrics
 
@@ -313,6 +348,7 @@ POST /tasks/{id}/retry
 
 GET /dlq
 POST /dlq/{id}/replay
+POST /dlq/{id}/replay?resetAttempts=true
 
 GET /queues
 POST /queues/{queue}/pause
@@ -378,8 +414,10 @@ taskqueue:
       base-delay-ms: 1000
   worker:
     poll-interval-ms: 1000
+    handler-timeout-ms: 30000
   scheduler:
     poll-interval-ms: 1000
+    lock-ttl-ms: 10000
   reaper:
     stuck-threshold-minutes: 5
     poll-interval-ms: 30000
@@ -389,21 +427,20 @@ taskqueue:
 
 ## Known Reliability Gaps
 
-These are the highest-value architecture improvements:
+These are the highest-value architecture improvements still open:
 
-1. Make delayed remove plus live enqueue atomic with a Redis Lua script.
-2. Add a distributed scheduler lock if multiple app instances are expected.
-3. Consider retry jitter and a max backoff cap.
-4. Decide whether stuck reaping should increment `attempt` or use retry/DLQ
-   logic instead of always re-enqueueing.
-5. Persist queue pause state if it must survive restarts.
+1. Route stuck reaping through retry/DLQ logic instead of always re-enqueueing.
+2. Consider retry jitter and a max backoff cap.
+3. Consider a more transactional delayed promotion strategy across Redis and DB
+   if stronger guarantees are needed.
+4. Remove `TaskType` or turn it into a real enum/value object.
 
 ## Design Decisions
 
 PostgreSQL stores the durable record because tasks need queryable status,
 history, result, and error state. Redis stores live broker state because it is a
-good fit for fast priority queues, delayed sets, and short-lived operational
-lists.
+good fit for fast priority queues, delayed sets, short-lived operational lists,
+distributed locks, and operational flags.
 
 The worker model uses Java 21 virtual threads instead of a reactive stack. This
 keeps handler and broker code straightforward while still allowing many blocking

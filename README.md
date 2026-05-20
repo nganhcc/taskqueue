@@ -2,19 +2,29 @@
 
 A Java 21 Spring Boot task queue backed by PostgreSQL and Redis.
 
-The application exposes REST APIs for creating and inspecting tasks, stores durable task state in PostgreSQL, uses Redis for live queue state, and runs background workers that execute registered task handlers with retry and DLQ support.
+The application exposes REST APIs for creating and inspecting tasks, stores
+durable task state in PostgreSQL, uses Redis for live queue state, and runs
+background workers that execute registered task handlers with retry and DLQ
+support.
 
 ## Features
 
 - Enqueue immediate and delayed tasks
-- Store task state, payload, result, and error details in PostgreSQL
-- Use Redis for ready queues, processing queues, delayed tasks, and the dead letter queue
+- Store task state, payload, result, error, and stack traces in PostgreSQL
+- Use Redis for ready queues, processing queues, delayed tasks, DLQ entries,
+  scheduler locks, and paused queue state
 - Per-queue concurrency and retry settings
 - Priority ordering for ready tasks
+- Atomic Redis Lua polling for ready queues
+- Lua-backed delayed queue polling
+- Distributed Redis lock for delayed scheduling
 - Worker execution with Java 21 virtual threads
+- Handler timeout with retry/DLQ behavior
 - Exponential retry backoff
 - Stuck task reaper for tasks left in `RUNNING`
 - Queue pause, resume, run-once, and purge operations
+- Queue pause state persists in Redis across app restarts
+- Delayed/DLQ purges update matching PostgreSQL task state
 - Task, queue, and DLQ inspection APIs
 
 ## Stack
@@ -55,7 +65,8 @@ Run tests:
 ./mvnw test
 ```
 
-Some tests, including smoke tests, expect PostgreSQL and Redis to be available on the ports from `docker-compose.yml`.
+Some tests, including smoke tests, expect PostgreSQL and Redis to be available
+on the ports from `docker-compose.yml`.
 
 ## Local Services
 
@@ -89,8 +100,10 @@ taskqueue:
       base-delay-ms: 1000
   worker:
     poll-interval-ms: 1000
+    handler-timeout-ms: 30000
   scheduler:
     poll-interval-ms: 1000
+    lock-ttl-ms: 10000
   reaper:
     stuck-threshold-minutes: 5
     poll-interval-ms: 30000
@@ -184,6 +197,8 @@ PENDING -> RUNNING -> DONE
 RUNNING -> PENDING  # retry scheduled
 RUNNING -> DEAD     # retries exhausted
 PENDING/RUNNING -> FAILED  # cancelled or purged
+DEAD -> PENDING     # DLQ replay
+FAILED -> PENDING   # manual retry
 ```
 
 Important fields:
@@ -198,10 +213,11 @@ Important fields:
 | `attempt` | Number of failed attempts so far |
 | `maxRetries` | Retry limit for the task |
 | `priority` | Higher priority tasks run first |
-| `runAt` | Earliest execution time for delayed tasks |
+| `runAt` | Earliest execution time for delayed/retry tasks |
 | `startedAt` | Last time a worker started the task |
 | `result` | Handler result JSON string |
 | `error` | Last error message |
+| `stackTrace` | Last failure stack trace |
 
 ## Workers and Handlers
 
@@ -237,7 +253,8 @@ taskqueue:{queue}             # ready queue sorted set
 taskqueue:{queue}:processing  # in-flight task list
 taskqueue:delayed             # delayed task sorted set
 taskqueue:dlq                 # dead letter queue list
-taskqueue:scheduler:lock      # scheduler lock key
+taskqueue:scheduler:lock      # delayed scheduler lock
+taskqueue:queues:paused       # paused queue names set
 ```
 
 Useful inspection commands:
@@ -248,6 +265,8 @@ ZRANGE taskqueue:default 0 -1 WITHSCORES
 LRANGE taskqueue:default:processing 0 -1
 ZRANGE taskqueue:delayed 0 -1 WITHSCORES
 LRANGE taskqueue:dlq 0 -1
+SMEMBERS taskqueue:queues:paused
+GET taskqueue:scheduler:lock
 ```
 
 ## Database Migrations
@@ -265,7 +284,8 @@ V1__create_tasks.sql
 V2__add_task_priority.sql
 ```
 
-Hibernate is configured with `ddl-auto: validate`, so schema changes should be made through Flyway migrations.
+Hibernate is configured with `ddl-auto: validate`, so schema changes should be
+made through Flyway migrations.
 
 ## Project Structure
 
@@ -286,8 +306,11 @@ src/main/java/com/nganhcc/task_queue/
 
 ## Known Limitations
 
-- Queue pause state is in memory only and is cleared on application restart.
-- DLQ replay keeps the existing attempt count by default. Use `resetAttempts=true` to reset it during replay.
+- Delayed promotion atomically removes due entries from `taskqueue:delayed`, but
+  DB lookup and live queue enqueue are separate steps.
+- The stuck task reaper re-enqueues stale `RUNNING` tasks without incrementing
+  `attempt` or applying retry/DLQ exhaustion rules.
+- Retry backoff has no jitter or maximum delay cap.
 - `TaskType` is currently a placeholder.
 
 ## More Documentation

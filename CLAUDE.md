@@ -5,8 +5,8 @@ codebase changes.
 
 ## Project Snapshot
 
-`task-queue` is a Java 21 Spring Boot 4.0.6 backend for a Redis/PostgreSQL
-task queue.
+`task-queue` is a Java 21 Spring Boot 4.0.6 backend for a Redis/PostgreSQL task
+queue.
 
 Current implementation is a working backend foundation:
 
@@ -14,12 +14,17 @@ Current implementation is a working backend foundation:
 - PostgreSQL durable task storage through Spring Data JPA and Flyway
 - Redis live queue state through `RedisTemplate<String, String>`
 - Immediate queues with priority ordering
-- Delayed task scheduling
+- Delayed task scheduling and promotion
+- Atomic Redis Lua polling for ready and delayed queues
+- Distributed Redis lock around delayed scheduling
 - Worker polling and handler execution on Java virtual threads
+- Handler timeout with retry/DLQ handling
 - Retry with exponential backoff
-- Dead letter queue replay
+- Dead letter queue replay with optional attempt reset
 - Stuck task reaper
-- Focused controller, service, broker, and worker tests
+- Redis-backed persistent queue pause state
+- Queue, delayed, and DLQ purge operations that update DB task state
+- Focused controller, service, broker, scheduler, and worker tests
 
 There is no React dashboard in this repository yet.
 
@@ -69,7 +74,8 @@ folders.
 ## Runtime Model
 
 PostgreSQL is the durable source of truth for task state and history. Redis is
-the live broker for ready work, processing work, delayed work, and DLQ entries.
+the live broker for ready work, processing work, delayed work, DLQ entries,
+scheduler locks, and paused queue state.
 
 High-level flow:
 
@@ -118,6 +124,7 @@ POST /queues/dlq/purge
 
 GET /dlq
 POST /dlq/{id}/replay
+POST /dlq/{id}/replay?resetAttempts=true
 
 GET /metrics/tasks
 GET /metrics/queues
@@ -134,7 +141,8 @@ Queue config is bound by `QueueProperties` with:
 ```
 
 Use the `taskqueue` prefix consistently. YAML uses kebab-case fields such as
-`max-retries`, `base-delay-ms`, and `poll-interval-ms`; Java uses camelCase.
+`max-retries`, `base-delay-ms`, `handler-timeout-ms`, `poll-interval-ms`, and
+`lock-ttl-ms`; Java uses camelCase.
 
 Configured queues currently include:
 
@@ -146,6 +154,21 @@ Each queue supports:
 - `concurrency`
 - `maxRetries`
 - `baseDelayMs`
+
+Worker config supports:
+
+- `pollIntervalMs`
+- `handlerTimeoutMs`
+
+Scheduler config supports:
+
+- `pollIntervalMs`
+- `lockTtlMs`
+
+Reaper config supports:
+
+- `stuckThresholdMinutes`
+- `pollIntervalMs`
 
 ## Database Rules
 
@@ -187,25 +210,30 @@ taskqueue:{queue}             # ready queue sorted set
 taskqueue:{queue}:processing  # in-flight task list
 taskqueue:delayed             # delayed task sorted set
 taskqueue:dlq                 # dead letter queue list
-taskqueue:scheduler:lock      # key helper exists, lock is not implemented yet
+taskqueue:scheduler:lock      # delayed scheduler distributed lock
+taskqueue:queues:paused       # Redis set of paused queue names
 ```
 
 Ready queues are sorted sets, not lists. `RedisBroker.enqueue` scores tasks so
 higher `priority` runs first, and older tasks of the same priority run first.
-`RedisBroker.poll` uses a Lua script to atomically move one task from the ready
-sorted set into the processing list.
 
-## Known Limitations
+`RedisBroker.poll` uses a Lua script to atomically move one task from the ready
+sorted set into the processing list. `RedisBroker.pollReadyDelayed` uses a Lua
+script to atomically remove one due task from the delayed sorted set.
+
+Scheduler lock release uses a Lua token check so one app instance cannot delete
+another instance's lock.
+
+## Current Limitations
 
 Keep these in mind when extending the system:
 
-- Delayed promotion removes from `taskqueue:delayed` and then enqueues to the
-  live queue as separate operations.
-- `RedisKeys.schedulerLock()` exists, but `DelayedTaskScheduler` does not use a
-  distributed lock yet.
-- Queue pause state is in memory only and is lost on restart.
-- DLQ replay keeps the existing `attempt` count by default, and supports
-  `resetAttempts=true` to reset the count to `0`.
+- Delayed promotion atomically removes from `taskqueue:delayed`, but DB lookup
+  and live queue enqueue are still separate operations.
+- The stuck task reaper always re-enqueues stale `RUNNING` tasks and does not
+  increment `attempt` or route through retry/DLQ exhaustion logic.
+- Retry backoff has no jitter or max-delay cap.
+- `TaskType` currently exists as a placeholder with no behavior.
 - Handlers must be idempotent because delivery is at-least-once in design and
   duplicates are possible.
 
@@ -220,6 +248,7 @@ Keep these in mind when extending the system:
 - When acknowledging a processing item, use the Redis payload that was polled,
   not a later mutated DB copy.
 - Do not add dashboard or frontend code unless explicitly requested.
+- If you add or change behavior, add focused tests in the same feature branch.
 
 ## Useful Commands
 
@@ -234,7 +263,7 @@ docker compose up -d
 ./mvnw test
 
 # Run focused backend tests
-./mvnw test -Dtest=WorkerTest,TaskServiceTest,RedisBrokerTest,TaskControllerTest
+./mvnw test -Dtest=DlqControllerTest,QueueControllerTest,DelayedTaskSchedulerTest,WorkerTest,TaskServiceTest,QueueControllerServiceTest,RedisBrokerTest,TaskControllerTest
 
 # Run smoke tests, requires PostgreSQL and Redis from docker-compose
 ./mvnw test -Dtest=SmokeTest

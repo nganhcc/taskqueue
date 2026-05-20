@@ -9,26 +9,16 @@ Build a Java 21 Spring Boot task queue backed by PostgreSQL and Redis.
 Current design:
 
 - PostgreSQL stores durable task state.
-- Redis stores live queue state, delayed tasks, processing tasks, and DLQ entries.
+- Redis stores live queue state, delayed tasks, processing tasks, DLQ entries,
+  scheduler locks, and paused queue state.
 - REST APIs create, inspect, cancel, retry, replay, and operate queues.
-- Workers poll Redis, execute registered handlers, update PostgreSQL, retry failures, and move exhausted tasks to DLQ.
+- Workers poll Redis, execute registered handlers, update PostgreSQL, retry
+  failures, and move exhausted tasks to DLQ.
 
 Important package:
 
 ```text
 com.nganhcc.task_queue
-```
-
-Current branch:
-
-```text
-feature-task-queue-backend
-```
-
-Remote branch:
-
-```text
-origin/feature-task-queue-backend
 ```
 
 ## Stack
@@ -60,8 +50,8 @@ Implemented:
 - Flyway migrations
 - Actuator endpoint exposure
 - `taskqueue.queues` config for `default` and `high_priority`
-- worker polling interval
-- scheduler polling interval
+- worker polling interval and handler timeout
+- scheduler polling interval and distributed lock TTL
 - reaper polling interval and stuck threshold
 
 `QueueProperties` is bound with:
@@ -75,6 +65,16 @@ Queue config currently supports:
 - `concurrency`
 - `maxRetries`
 - `baseDelayMs`
+
+Worker config supports:
+
+- `pollIntervalMs`
+- `handlerTimeoutMs`
+
+Scheduler config supports:
+
+- `pollIntervalMs`
+- `lockTtlMs`
 
 ### Database
 
@@ -112,7 +112,8 @@ FAILED
 DEAD
 ```
 
-`TaskRepository` supports lookup by status, queue, queue/status, queue/status-in, delayed run time, stale started time, and status counts.
+`TaskRepository` supports lookup by status, queue, queue/status,
+queue/status-in, pending delayed tasks, stale running tasks, and status counts.
 
 ### Task API
 
@@ -149,7 +150,7 @@ Create task behavior:
 
 Cancel behavior:
 
-- allows cancelling non-terminal tasks
+- allows cancelling non-terminal tasks except `DONE` and `DEAD`
 - marks task `FAILED`
 - sets error to `Task cancelled`
 - worker skips non-`PENDING` tasks if stale Redis entries are later polled
@@ -193,6 +194,7 @@ taskqueue:{queue}:processing
 taskqueue:delayed
 taskqueue:dlq
 taskqueue:scheduler:lock
+taskqueue:queues:paused
 ```
 
 Current storage:
@@ -201,12 +203,21 @@ Current storage:
 - processing queue: Redis list
 - delayed queue: Redis sorted set scored by `runAt.toEpochMilli()`
 - DLQ: Redis list
+- paused queues: Redis set
+- scheduler lock: Redis string with TTL and token
 
 Priority behavior:
 
 - higher `Task.priority` should run first
 - same priority is ordered by `createdAt`
-- live poll uses a Redis Lua script to atomically move one task from the ready sorted set into the processing list
+- live poll uses a Redis Lua script to atomically move one task from the ready
+  sorted set into the processing list
+
+Delayed behavior:
+
+- due delayed poll uses a Redis Lua script to atomically find and remove one due
+  delayed task JSON
+- scheduler validates against PostgreSQL before live enqueue
 
 ### Worker Runtime
 
@@ -234,18 +245,19 @@ Worker.runOnce(queue)
   -> if DB task is not PENDING, acknowledge Redis processing entry and return
   -> mark RUNNING and set startedAt
   -> find handler by task.fn
-  -> execute handler
+  -> execute handler with timeout
   -> on success: mark DONE, store result, acknowledge
-  -> on failure: increment attempt, store error
+  -> on failure/timeout: increment attempt, store error and stackTrace
       -> retry if attempts remain
       -> otherwise mark DEAD and send to DLQ
+  -> acknowledge processing entry in finally
 ```
 
 `WorkerBootstrap`:
 
 - scheduled by `taskqueue.worker.poll-interval-ms`
 - loops through configured queues
-- skips paused queues
+- skips queues paused in Redis
 - submits up to `queue.concurrency` work items per tick
 - uses Java 21 virtual threads
 - has an `AtomicBoolean` guard to avoid overlapping submit batches
@@ -278,13 +290,15 @@ src/main/java/com/nganhcc/task_queue/scheduler/DelayedTaskScheduler.java
 Behavior:
 
 - scheduled by `taskqueue.scheduler.poll-interval-ms`
-- finds delayed Redis tasks with score <= now
-- removes them from delayed Redis set
+- acquires `taskqueue:scheduler:lock` using configured `lock-ttl-ms`
+- exits early when another app instance holds the lock
+- polls ready delayed Redis tasks with score <= now through Lua
 - loads matching DB task
 - skips missing or non-`PENDING` tasks
 - clears `runAt`
 - saves DB task
 - enqueues saved task back to the live priority queue
+- releases scheduler lock in `finally`
 
 ### DLQ
 
@@ -307,7 +321,8 @@ Behavior:
 - exhausted tasks become `DEAD`
 - worker pushes exhausted task JSON to `taskqueue:dlq`
 - `/dlq` lists current DLQ entries
-- replay removes the DLQ entry, loads the DB task, sets it to `PENDING`, clears failure fields, saves, and re-enqueues
+- replay removes the DLQ entry, loads the DB task, sets it to `PENDING`, clears
+  failure fields, saves, and re-enqueues
 - replay keeps `attempt` unchanged by default
 - replay with `resetAttempts=true` resets `attempt` to `0`
 
@@ -328,6 +343,11 @@ Behavior:
 - marks DB task `PENDING`
 - clears `startedAt`
 - saves and re-enqueues task
+
+Current limitation:
+
+- stale tasks are directly re-enqueued and do not increment `attempt` or route
+  through retry/DLQ exhaustion logic
 
 ### Queue Operations API
 
@@ -352,15 +372,14 @@ POST /queues/dlq/purge
 
 Behavior:
 
-- pause/resume state is in memory
+- pause/resume state is persisted in Redis set `taskqueue:queues:paused`
 - `run-once` manually invokes `Worker.runOnce(queue)`
-- queue purge deletes live and processing Redis keys and marks matching `PENDING`/`RUNNING` DB tasks as `FAILED` with error `Queue purged`
-- delayed purge deletes `taskqueue:delayed`
-- DLQ purge deletes `taskqueue:dlq`
-
-Important limitation:
-
-- pause state is not persisted. Restarting the app clears paused queues.
+- queue purge deletes live and processing Redis keys and marks matching
+  `PENDING`/`RUNNING` DB tasks as `FAILED` with error `Queue purged`
+- delayed purge deletes `taskqueue:delayed` and marks pending delayed DB tasks
+  as `FAILED` with error `Delayed queue purged`
+- DLQ purge deletes `taskqueue:dlq` and marks `DEAD` DB tasks as `FAILED` with
+  error `DLQ purged`
 
 ### Metrics
 
@@ -390,11 +409,15 @@ Queue metrics:
 
 ### Tests
 
-Current focused tests:
+Current focused tests include:
 
 ```text
+src/test/java/com/nganhcc/task_queue/api/DlqControllerTest.java
+src/test/java/com/nganhcc/task_queue/api/QueueControllerTest.java
 src/test/java/com/nganhcc/task_queue/api/TaskControllerTest.java
 src/test/java/com/nganhcc/task_queue/broker/RedisBrokerTest.java
+src/test/java/com/nganhcc/task_queue/scheduler/DelayedTaskSchedulerTest.java
+src/test/java/com/nganhcc/task_queue/service/QueueControllerServiceTest.java
 src/test/java/com/nganhcc/task_queue/service/TaskServiceTest.java
 src/test/java/com/nganhcc/task_queue/worker/WorkerTest.java
 ```
@@ -406,19 +429,14 @@ src/test/java/com/nganhcc/task_queue/SmokeTest.java
 src/test/java/com/nganhcc/task_queue/TaskQueueApplicationTests.java
 ```
 
-Targeted verification command used recently:
+Focused verification command:
 
 ```bash
-./mvnw test -Dtest=WorkerTest,TaskServiceTest,RedisBrokerTest,TaskControllerTest
+./mvnw test -Dtest=DlqControllerTest,QueueControllerTest,DelayedTaskSchedulerTest,WorkerTest,TaskServiceTest,QueueControllerServiceTest,RedisBrokerTest,TaskControllerTest
 ```
 
-Result on 2026-05-18:
-
-```text
-21 tests, 0 failures
-```
-
-Full test suite may require PostgreSQL and Redis running locally because smoke tests touch Docker-published ports.
+Full test suite may require PostgreSQL and Redis running locally because smoke
+tests touch Docker-published ports.
 
 ## Manual API Examples
 
@@ -460,26 +478,6 @@ curl -i -X POST http://localhost:8080/tasks \
   }'
 ```
 
-List tasks:
-
-```bash
-curl -i http://localhost:8080/tasks
-curl -i 'http://localhost:8080/tasks?queue=default&status=PENDING'
-```
-
-Get task:
-
-```bash
-curl -i http://localhost:8080/tasks/{id}
-```
-
-Cancel or retry:
-
-```bash
-curl -i -X POST http://localhost:8080/tasks/{id}/cancel
-curl -i -X POST http://localhost:8080/tasks/{id}/retry
-```
-
 Queue operations:
 
 ```bash
@@ -488,6 +486,8 @@ curl -i -X POST http://localhost:8080/queues/default/pause
 curl -i -X POST http://localhost:8080/queues/default/resume
 curl -i -X POST http://localhost:8080/queues/default/run-once
 curl -i -X POST http://localhost:8080/queues/default/purge
+curl -i -X POST http://localhost:8080/queues/delayed/purge
+curl -i -X POST http://localhost:8080/queues/dlq/purge
 ```
 
 DLQ:
@@ -495,7 +495,7 @@ DLQ:
 ```bash
 curl -i http://localhost:8080/dlq
 curl -i -X POST http://localhost:8080/dlq/{id}/replay
-curl -i -X POST http://localhost:8080/queues/dlq/purge
+curl -i -X POST 'http://localhost:8080/dlq/{id}/replay?resetAttempts=true'
 ```
 
 Metrics:
@@ -513,54 +513,34 @@ ZRANGE taskqueue:default 0 -1 WITHSCORES
 LRANGE taskqueue:default:processing 0 -1
 ZRANGE taskqueue:delayed 0 -1 WITHSCORES
 LRANGE taskqueue:dlq 0 -1
+SMEMBERS taskqueue:queues:paused
+GET taskqueue:scheduler:lock
 ```
 
 ## Useful Commands
 
 ```bash
 ./mvnw -q -DskipTests compile
-./mvnw test -Dtest=WorkerTest,TaskServiceTest,RedisBrokerTest,TaskControllerTest
+./mvnw test -Dtest=DlqControllerTest,QueueControllerTest,DelayedTaskSchedulerTest,WorkerTest,TaskServiceTest,QueueControllerServiceTest,RedisBrokerTest,TaskControllerTest
 ./mvnw test
 docker compose up -d
 docker compose ps
 ```
 
-## Current Git State
-
-Clean feature branch was pushed:
-
-```text
-feature-task-queue-backend
-```
-
-Commits on the branch:
-
-```text
-feat: add task lifecycle API and Redis broker
-feat: add worker runtime with retry scheduling
-feat: add operational queue and DLQ APIs
-test: cover task service broker and worker flows
-docs: add project progress handoff
-```
-
-PR URL:
-
-```text
-https://github.com/nganhcc/taskqueue/pull/new/feature-task-queue-backend
-```
-
 ## Known Limitations / Next Improvements
 
-1. Queue pause state is in memory.
-   - Restarting the app clears paused queues.
-   - Persist pause state in Redis if operational persistence is needed.
+1. Stuck reaper should use retry/DLQ policy.
+   - Current behavior directly re-enqueues stale `RUNNING` tasks.
+   - Better behavior would increment `attempt`, apply backoff, and send to DLQ
+     when retries are exhausted.
 
-2. Purging delayed and DLQ queues only clears Redis.
-   - Per-queue purge updates DB tasks, but delayed/DLQ purge does not update matching DB rows.
+2. Retry backoff could use jitter and a max cap.
+   - Current exponential delay is deterministic and unbounded.
 
-3. Tests need broader coverage.
-   - Add focused tests for `QueueController`, `MetricsController`, `DelayedTaskScheduler`, and `StuckTaskReaper`.
-   - Update smoke/full integration tests as the API stabilizes.
+3. Delayed promotion could be made stronger across Redis and PostgreSQL.
+   - Redis delayed removal is atomic, but DB validation and live enqueue are
+     separate operations.
 
 4. `TaskType` currently exists but has no behavior.
-   - Remove it or turn it into a real enum/value object when handler typing needs it.
+   - Remove it or turn it into a real enum/value object when handler typing
+     needs it.
