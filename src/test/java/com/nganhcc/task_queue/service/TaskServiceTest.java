@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -207,6 +208,40 @@ class TaskServiceTest {
         verify(redisBroker).enqueueDelayed(taskCaptor.capture());
         verify(redisBroker, never()).enqueue(any(Task.class));
         assertThat(taskCaptor.getValue().getRunAt()).isEqualTo(runAt);
+    }
+
+    @Test
+    void markDelayedPurgedMarksPendingDelayedTasksFailed() {
+        Task delayedTask = new Task(null, "default", "send_email", "{}", 3, 0,
+                Instant.parse("2030-01-01T00:00:00Z"));
+        delayedTask.setStartedAt(Instant.parse("2026-05-20T00:00:00Z"));
+        when(taskRepository.findByStatusAndRunAtIsNotNull(TaskStatus.PENDING))
+                .thenReturn(List.of(delayedTask));
+
+        int marked = taskService.markDelayedPurged();
+
+        assertThat(marked).isEqualTo(1);
+        assertThat(delayedTask.getStatus()).isEqualTo(TaskStatus.FAILED);
+        assertThat(delayedTask.getError()).isEqualTo("Delayed queue purged");
+        assertThat(delayedTask.getRunAt()).isNull();
+        assertThat(delayedTask.getStartedAt()).isNull();
+        verify(taskRepository).saveAll(List.of(delayedTask));
+    }
+
+    @Test
+    void markDlqPurgedMarksDeadTasksFailed() {
+        Task deadTask = new Task(null, "default", "send_email", "{}", 3, 0, null);
+        deadTask.setStatus(TaskStatus.DEAD);
+        deadTask.setStartedAt(Instant.parse("2026-05-20T00:00:00Z"));
+        when(taskRepository.findByStatus(TaskStatus.DEAD)).thenReturn(List.of(deadTask));
+
+        int marked = taskService.markDlqPurged();
+
+        assertThat(marked).isEqualTo(1);
+        assertThat(deadTask.getStatus()).isEqualTo(TaskStatus.FAILED);
+        assertThat(deadTask.getError()).isEqualTo("DLQ purged");
+        assertThat(deadTask.getStartedAt()).isNull();
+        verify(taskRepository).saveAll(List.of(deadTask));
     }
 
     private QueueConfig queueConfig(int maxRetries) {
