@@ -3,6 +3,7 @@ package com.nganhcc.task_queue.broker;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.data.redis.core.RedisTemplate;
@@ -112,6 +113,22 @@ public class RedisBroker {
 
     }
     
+    public void pauseQueue(String queue){
+        redisTemplate.opsForSet().add(RedisKeys.pausedQueues(),queue);
+    }
+
+    public void resumeQueue(String queue){
+        redisTemplate.opsForSet().remove(RedisKeys.pausedQueues(),queue);
+    }
+    public boolean isQueuePaused(String queue){
+        Boolean member = redisTemplate.opsForSet().isMember(RedisKeys.pausedQueues(), queue);
+        return Boolean.TRUE.equals(member);
+    }
+
+    public Set<String> pausedQueues(){
+        Set<String> queues = redisTemplate.opsForSet().members(RedisKeys.pausedQueues());
+        return queues==null? Set.of() : queues;
+    }
     public Long queueDepth(String queueName){
         return redisTemplate.opsForZSet().size(RedisKeys.queue(queueName));
     }

@@ -1,27 +1,32 @@
 package com.nganhcc.task_queue.service;
 
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.stereotype.Service;
 
+import com.nganhcc.task_queue.broker.RedisBroker;
+
 @Service
 public class QueueControllerService {
-    private final Set<String> pausedQueues = ConcurrentHashMap.newKeySet();
+    private final RedisBroker redisBroker;
+
+    public QueueControllerService(RedisBroker redisBroker){
+        this.redisBroker=redisBroker;
+    }
 
     public void pause(String queue){
-        pausedQueues.add(queue);
+        redisBroker.pauseQueue(queue);
     }
     
     public void resume(String queue){
-        pausedQueues.remove(queue);
+        redisBroker.resumeQueue(queue);
     }
     
     public boolean isPaused(String queue){
-        return pausedQueues.contains(queue);
+        return redisBroker.isQueuePaused(queue);
     }
 
     public Set<String> pausedQueues(){
-        return Set.copyOf(pausedQueues);
+        return redisBroker.pausedQueues();
     }
 }

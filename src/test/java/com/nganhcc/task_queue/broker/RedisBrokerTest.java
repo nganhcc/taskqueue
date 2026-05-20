@@ -11,10 +11,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -209,5 +211,93 @@ class RedisBrokerTest {
                 any(RedisScript.class),
                 eq(List.of("taskqueue:scheduler:lock")),
                 eq("token-1"));
+    }
+
+    @Test
+    void pauseQueueAddsQueueToPausedSet() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        SetOperations<String, String> setOperations = mock(SetOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+
+        redisBroker.pauseQueue("default");
+
+        verify(setOperations).add("taskqueue:queues:paused", "default");
+    }
+
+    @Test
+    void resumeQueueRemovesQueueFromPausedSet() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        SetOperations<String, String> setOperations = mock(SetOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+
+        redisBroker.resumeQueue("default");
+
+        verify(setOperations).remove("taskqueue:queues:paused", "default");
+    }
+
+    @Test
+    void isQueuePausedReturnsTrueWhenRedisSetContainsQueue() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        SetOperations<String, String> setOperations = mock(SetOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+        when(setOperations.isMember("taskqueue:queues:paused", "default")).thenReturn(true);
+
+        boolean paused = redisBroker.isQueuePaused("default");
+
+        assertThat(paused).isTrue();
+    }
+
+    @Test
+    void isQueuePausedReturnsFalseWhenRedisSetDoesNotContainQueue() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        SetOperations<String, String> setOperations = mock(SetOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+        when(setOperations.isMember("taskqueue:queues:paused", "default")).thenReturn(false);
+
+        boolean paused = redisBroker.isQueuePaused("default");
+
+        assertThat(paused).isFalse();
+    }
+
+    @Test
+    void pausedQueuesReturnsRedisSetMembers() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        SetOperations<String, String> setOperations = mock(SetOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+        when(setOperations.members("taskqueue:queues:paused")).thenReturn(Set.of("default", "high_priority"));
+
+        Set<String> pausedQueues = redisBroker.pausedQueues();
+
+        assertThat(pausedQueues).containsExactlyInAnyOrder("default", "high_priority");
+    }
+
+    @Test
+    void pausedQueuesReturnsEmptySetWhenRedisReturnsNull() {
+        RedisTemplate<String, String> redisTemplate = mock(RedisTemplate.class);
+        SetOperations<String, String> setOperations = mock(SetOperations.class);
+        TaskSerializer taskSerializer = mock(TaskSerializer.class);
+        RedisBroker redisBroker = new RedisBroker(redisTemplate, taskSerializer);
+
+        when(redisTemplate.opsForSet()).thenReturn(setOperations);
+        when(setOperations.members("taskqueue:queues:paused")).thenReturn(null);
+
+        Set<String> pausedQueues = redisBroker.pausedQueues();
+
+        assertThat(pausedQueues).isEmpty();
     }
 }
