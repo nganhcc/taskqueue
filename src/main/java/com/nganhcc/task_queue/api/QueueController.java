@@ -80,14 +80,20 @@ public class QueueController {
     @PostMapping("/queues/delayed/purge")
     public Map<String, Object> purgeDelayed(){
         Boolean delayedDeleted = redisBroker.purgeDelayed();
+        int tasksMarkedFailed = taskService.markDelayedPurged();
         return Map.of(
-            "delayedDeleted", Boolean.TRUE.equals(delayedDeleted)
+            "delayedDeleted", Boolean.TRUE.equals(delayedDeleted),
+            "tasksMarkedFailed", tasksMarkedFailed
         );
     }
     @PostMapping("/queues/dlq/purge")
     public Map<String, Object> purgeDlq() {
-        Boolean deleted = redisBroker.purgeDlq();
-        return Map.of("dlqDeleted", Boolean.TRUE.equals(deleted));
+        Boolean dlqDeleted = redisBroker.purgeDlq();
+        int tasksMarkedFailed = taskService.markDlqPurged();
+        return Map.of(
+            "dlqDeleted", Boolean.TRUE.equals(dlqDeleted),
+            "tasksMarkedFailed", tasksMarkedFailed
+        );
     }
     private void requireQueue(String queue){
         if (!queueProperties.getQueues().containsKey(queue)){
