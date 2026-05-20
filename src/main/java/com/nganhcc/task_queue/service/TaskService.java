@@ -137,7 +137,7 @@ public class TaskService {
     }
 
     public int markDlqPurged(){
-        List<Task> tasks = taskRepository.findByStatusAndRunAtIsNotNull(TaskStatus.DEAD);
+        List<Task> tasks = taskRepository.findByStatus(TaskStatus.DEAD);
         for (Task task: tasks){
             task.setStatus(TaskStatus.FAILED);
             task.setError("DLQ purged");
