@@ -123,6 +123,29 @@ public class TaskService {
         taskRepository.saveAll(tasks);
         return tasks.size();
     }
+
+    public int markDelayedPurged(){
+        List<Task> tasks = taskRepository.findByStatusAndRunAtIsNotNull(TaskStatus.PENDING);
+        for (Task task : tasks){
+            task.setStatus(TaskStatus.FAILED);
+            task.setError("Delayed queue purged");
+            task.setRunAt(null);
+            task.setStartedAt(null);
+        }
+        taskRepository.saveAll(tasks);
+        return tasks.size();
+    }
+
+    public int markDlqPurged(){
+        List<Task> tasks = taskRepository.findByStatusAndRunAtIsNotNull(TaskStatus.DEAD);
+        for (Task task: tasks){
+            task.setStatus(TaskStatus.FAILED);
+            task.setError("DLQ purged");
+            task.setStartedAt(null);
+        }
+        taskRepository.saveAll(tasks);
+        return tasks.size();
+    }
     private String normalizeQueue(String queue) {
         if (queue == null || queue.isBlank()) {
             return DEFAULT_QUEUE;

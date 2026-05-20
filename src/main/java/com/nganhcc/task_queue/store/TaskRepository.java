@@ -24,4 +24,6 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     long countByStatus(TaskStatus status);
 
     List<Task> findByQueueAndStatusIn(String queue, List<TaskStatus> statuses);
+
+    List<Task>  findByStatusAndRunAtIsNotNull(TaskStatus status);
 }
