@@ -2,6 +2,7 @@ package com.nganhcc.task_queue.store;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -26,4 +27,10 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
     List<Task> findByQueueAndStatusIn(String queue, List<TaskStatus> statuses);
 
     List<Task>  findByStatusAndRunAtIsNotNull(TaskStatus status);
+    
+    long deleteByStatusAndCreatedAtBefore(TaskStatus status, Instant cutoff);
+
+    Optional<Task> findByQueueAndIdempotencyKey(String queue, String idempotencyKey);
+
+    List<Task> findByStatusAndHeartbeatAtBefore(TaskStatus status, Instant heartbeatAt);
 }

@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
@@ -13,6 +14,7 @@ import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.config.QueueProperties;
 import com.nganhcc.task_queue.config.QueueProperties.QueueConfig;
 import com.nganhcc.task_queue.exception.BadRequestException;
+import com.nganhcc.task_queue.exception.ConflictException;
 import com.nganhcc.task_queue.exception.TaskNotFoundException;
 import com.nganhcc.task_queue.model.Task;
 import com.nganhcc.task_queue.model.TaskStatus;
@@ -45,6 +47,7 @@ public class TaskService {
         }
 
         String queue = normalizeQueue(request.queue());
+        String idempotencyKey = normalizeIdempotencyKey(request.idempotencyKey());
         String fn = requireFn(request.fn());
         JsonNode payload = requirePayload(request.payload());
         QueueConfig queueConfig = requireQueueConfig(queue);
@@ -52,8 +55,27 @@ public class TaskService {
         int priority = request.priority() == null ? 0: request.priority();
         String payloadJson = serializePayload(payload);
 
-        Task task = new Task(null, queue, fn, payloadJson, maxRetries,priority, request.runAt());
-        Task saved = taskRepository.save(task);
+        if (idempotencyKey != null){
+            Task existingTask = taskRepository.findByQueueAndIdempotencyKey(queue, idempotencyKey).orElse(null);
+            if (existingTask != null){
+                requireSameIdempotentRequest(existingTask, fn, payloadJson, maxRetries, priority, request.runAt());
+                return TaskResponse.from(existingTask, deserializePayload(existingTask.getPayload()));
+            }
+        }
+
+        Task task = new Task(null, queue, fn, payloadJson, maxRetries,priority, idempotencyKey, request.runAt());
+        Task saved;
+        try {
+            saved = taskRepository.save(task);
+        } catch (DataIntegrityViolationException e) {
+            if (idempotencyKey == null) {
+                throw e;
+            }
+            Task existingTask = taskRepository.findByQueueAndIdempotencyKey(queue, idempotencyKey)
+                    .orElseThrow(() -> e);
+            requireSameIdempotentRequest(existingTask, fn, payloadJson, maxRetries, priority, request.runAt());
+            return TaskResponse.from(existingTask, deserializePayload(existingTask.getPayload()));
+        }
 
         if( saved.getRunAt() == null || !saved.getRunAt().isAfter(Instant.now())){
             redisBroker.enqueue(saved);
@@ -89,9 +111,19 @@ public class TaskService {
         if (task.getStatus() == TaskStatus.DONE || task.getStatus() == TaskStatus.DEAD){
             throw new BadRequestException("Cannot cancel task with status: "+ task.getStatus());
         }
+
+        TaskStatus oldStatus = task.getStatus();
         task.setStatus(TaskStatus.FAILED);
         task.setError("Task cancelled");
+        task.setStartedAt(null);
+        task.setHeartbeatAt(null);
+        task.setRunAt(null);
         Task saved= taskRepository.save(task);
+        redisBroker.removeReadyById(task.getQueue(), task.getId());
+        redisBroker.removeDelayedById(task.getId());
+        if (oldStatus==TaskStatus.RUNNING){
+            redisBroker.removeProcessingById(task.getQueue(), task.getId());
+        }
         return TaskResponse.from(saved, deserializePayload(saved.getPayload()));
     }
 
@@ -103,6 +135,7 @@ public class TaskService {
         task.setStatus(TaskStatus.PENDING);
         task.setRunAt(null);
         task.setStartedAt(null);
+        task.setHeartbeatAt(null);
         task.setError(null);
         task.setStackTrace(null);
         Task saved= taskRepository.save(task);
@@ -119,6 +152,7 @@ public class TaskService {
             task.setStatus(TaskStatus.FAILED);
             task.setError("Queue purged");
             task.setStartedAt(null);
+            task.setHeartbeatAt(null);
         }
         taskRepository.saveAll(tasks);
         return tasks.size();
@@ -131,6 +165,7 @@ public class TaskService {
             task.setError("Delayed queue purged");
             task.setRunAt(null);
             task.setStartedAt(null);
+            task.setHeartbeatAt(null);
         }
         taskRepository.saveAll(tasks);
         return tasks.size();
@@ -142,6 +177,7 @@ public class TaskService {
             task.setStatus(TaskStatus.FAILED);
             task.setError("DLQ purged");
             task.setStartedAt(null);
+            task.setHeartbeatAt(null);
         }
         taskRepository.saveAll(tasks);
         return tasks.size();
@@ -151,6 +187,27 @@ public class TaskService {
             return DEFAULT_QUEUE;
         }
         return queue.trim();
+    }
+
+    public TaskResponse heartbeat(UUID id){
+        Task task = taskRepository.findById(id).orElseThrow(()-> new TaskNotFoundException(id));
+        if (task.getStatus() != TaskStatus.RUNNING){
+            throw new BadRequestException("Cannot heartbeat task with status: "+ task.getStatus());
+        }
+        task.setHeartbeatAt(Instant.now());
+        Task saved = taskRepository.save(task);
+        return TaskResponse.from(saved, deserializePayload(saved.getPayload()));
+    }
+
+    private String normalizeIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            return null;
+        }
+        String normalized = idempotencyKey.trim();
+        if (normalized.length() > 200) {
+            throw new BadRequestException("idempotencyKey must be 200 characters or fewer");
+        }
+        return normalized;
     }
 
     private String requireFn(String fn) {
@@ -173,7 +230,48 @@ public class TaskService {
         if (config == null) {
             throw new BadRequestException("Unknown queue: " + queue);
         }
+        validateQueueConfig(queue, config);
         return config;
+    }
+
+    private void validateQueueConfig(String queue, QueueConfig config) {
+        if (config.getConcurrency() <= 0) {
+            throw invalidQueueConfig(queue, "concurrency must be greater than 0");
+        }
+        if (config.getMaxRetries() < 0) {
+            throw invalidQueueConfig(queue, "max-retries must be greater than or equal to 0");
+        }
+        if (config.getBaseDelayMs() < 0) {
+            throw invalidQueueConfig(queue, "base-delay-ms must be greater than or equal to 0");
+        }
+        if (config.getMaxDelayMs() < config.getBaseDelayMs()) {
+            throw invalidQueueConfig(queue, "max-delay-ms must be greater than or equal to base-delay-ms");
+        }
+        if (config.getJitterPercent() < 0.0 || config.getJitterPercent() > 1.0) {
+            throw invalidQueueConfig(queue, "jitter-percent must be between 0.0 and 1.0");
+        }
+    }
+
+    private BadRequestException invalidQueueConfig(String queue, String message) {
+        return new BadRequestException("Invalid queue config for " + queue + ": " + message);
+    }
+
+    private void requireSameIdempotentRequest(
+            Task existingTask,
+            String fn,
+            String payloadJson,
+            int maxRetries,
+            int priority,
+            Instant runAt) {
+        boolean sameRequest = existingTask.getFn().equals(fn)
+                && existingTask.getPayload().equals(payloadJson)
+                && existingTask.getMaxRetries() == maxRetries
+                && existingTask.getPriority() == priority
+                && java.util.Objects.equals(existingTask.getRunAt(), runAt);
+
+        if (!sameRequest) {
+            throw new ConflictException("Idempotency key already used with different task request");
+        }
     }
 
     private int resolveMaxRetries(Integer requestedMaxRetries, QueueConfig queueConfig) {

@@ -40,6 +40,12 @@ public class Task {
     @Column(name= "priority", nullable = false)
     private int priority;
 
+    @Column(name = "idempotency_key", length =200)
+    private String idempotencyKey;
+
+    @Column(name = "heartbeat_at")
+    private Instant heartbeatAt;
+
     @Column(name = "run_at")
     private Instant runAt;
 
@@ -62,6 +68,10 @@ public class Task {
     }
 
     public Task(UUID id, String queue, String fn, String payload, int maxRetries, int priority, Instant runAt) {
+        this(id, queue, fn, payload, maxRetries, priority,  null, runAt);
+    }
+
+    public Task(UUID id, String queue, String fn, String payload, int maxRetries, int priority, String idempotencyKey,Instant runAt) {
         this.id = id;
         this.queue = queue;
         this.fn = fn;
@@ -70,6 +80,7 @@ public class Task {
         this.attempt = 0;
         this.maxRetries = maxRetries;
         this.priority=priority;
+        this.idempotencyKey=idempotencyKey;
         this.runAt = runAt;
         applyDefaults();
     }
@@ -153,6 +164,22 @@ public class Task {
 
     public void setPriority(int priority){
         this.priority=priority;
+    }
+
+    public String getIdempotencyKey(){
+        return this.idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey){
+        this.idempotencyKey=idempotencyKey;
+    }
+    
+    public Instant getHeartbeatAt(){
+        return this.heartbeatAt;
+    }
+
+    public void setHeartbeatAt(Instant heartbeatAt){
+        this.heartbeatAt= heartbeatAt;
     }
 
     public Instant getRunAt() {

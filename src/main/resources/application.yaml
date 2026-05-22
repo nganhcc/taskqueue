@@ -42,15 +42,25 @@ management:
       show-details: always
 
 taskqueue:
+  retention:
+    enabled: true
+    poll-interval-ms: 3600000
+    done-retention-days: 7
+    failed-retention-days: 30
+    dead-retention-days: 30
   queues:
     high_priority:
       concurrency: 10
       max-retries: 5
       base-delay-ms: 500
+      max-delay-ms: 10000
+      jitter-percent: 0.5
     default:
       concurrency: 4
       max-retries: 3
       base-delay-ms: 1000
+      max-delay-ms: 60000
+      jitter-percent: 0.5
   worker:
     poll-interval-ms: 1000
     handler-timeout-ms: 30000

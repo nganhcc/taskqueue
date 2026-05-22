@@ -65,7 +65,8 @@ class TaskServiceTest {
                 payload,
                 runAt,
                 7,
-                9));
+                9,
+                null));
 
         ArgumentCaptor<Task> taskCaptor = ArgumentCaptor.forClass(Task.class);
         verify(taskRepository).save(taskCaptor.capture());
@@ -95,6 +96,7 @@ class TaskServiceTest {
                 payload,
                 null,
                 1,
+                null,
                 null));
 
         assertThat(response.queue()).isEqualTo("default");
@@ -108,6 +110,7 @@ class TaskServiceTest {
                 "high_priority",
                 "send_email",
                 payload,
+                null,
                 null,
                 null,
                 null));
@@ -125,6 +128,7 @@ class TaskServiceTest {
                 payload,
                 null,
                 null,
+                null,
                 null)))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("Unknown queue: missing");
@@ -140,6 +144,7 @@ class TaskServiceTest {
                 payload,
                 null,
                 null,
+                null,
                 null)))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("fn is required");
@@ -150,6 +155,7 @@ class TaskServiceTest {
         assertThatThrownBy(() -> taskService.enqueue(new EnqueueTaskRequest(
                 "default",
                 "send_email",
+                null,
                 null,
                 null,
                 null,
@@ -168,6 +174,7 @@ class TaskServiceTest {
                 payload,
                 null,
                 -1,
+                null,
                 null)))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("maxRetries must be greater than or equal to 0");
@@ -181,6 +188,7 @@ class TaskServiceTest {
                 "default",
                 "send_email",
                 payload,
+                null,
                 null,
                 null,
                 null));
@@ -201,6 +209,7 @@ class TaskServiceTest {
                 "send_email",
                 payload,
                 runAt,
+                null,
                 null,
                 null));
 
