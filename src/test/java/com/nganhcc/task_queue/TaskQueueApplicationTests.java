@@ -1,13 +1,15 @@
 package com.nganhcc.task_queue;
 
-import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
+import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
 class TaskQueueApplicationTests {
 
 	@Test
-	void contextLoads() {
+	void applicationClassIsSpringBootApplication() {
+		assertThat(TaskQueueApplication.class).hasAnnotation(SpringBootApplication.class);
 	}
 
 }

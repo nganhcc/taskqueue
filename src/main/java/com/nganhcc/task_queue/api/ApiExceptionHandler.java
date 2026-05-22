@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import com.nganhcc.task_queue.api.dto.ErrorResponse;
 import com.nganhcc.task_queue.exception.BadRequestException;
+import com.nganhcc.task_queue.exception.ConflictException;
 import com.nganhcc.task_queue.exception.TaskNotFoundException;
 
 @RestControllerAdvice
@@ -30,5 +31,12 @@ public class ApiExceptionHandler {
     @ExceptionHandler(TaskNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleTaskNotFound(TaskNotFoundException exception){
         return ResponseEntity.status(404).body(new ErrorResponse(exception.getMessage()));
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(ConflictException exception) {
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse(exception.getMessage()));
     }
 }

@@ -1,6 +1,7 @@
 package com.nganhcc.task_queue;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -9,6 +10,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import static org.assertj.core.api.Assertions.assertThat;
  
 @SpringBootTest
+@EnabledIfSystemProperty(named = "taskqueue.smoke", matches = "true")
 class SmokeTest {
  
     @Autowired

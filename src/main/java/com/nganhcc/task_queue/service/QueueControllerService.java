@@ -17,6 +17,10 @@ public class QueueControllerService {
     public void pause(String queue){
         redisBroker.pauseQueue(queue);
     }
+
+    public void drain(String queue){
+        pause(queue);
+    }
     
     public void resume(String queue){
         redisBroker.resumeQueue(queue);

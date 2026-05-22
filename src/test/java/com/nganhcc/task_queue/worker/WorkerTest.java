@@ -24,6 +24,7 @@ import com.nganhcc.task_queue.config.QueueProperties.QueueConfig;
 import com.nganhcc.task_queue.model.Task;
 import com.nganhcc.task_queue.model.TaskStatus;
 import com.nganhcc.task_queue.retry.RetryPolicy;
+import com.nganhcc.task_queue.service.TaskFailureService;
 import com.nganhcc.task_queue.store.TaskRepository;
 
 class WorkerTest {
@@ -47,7 +48,12 @@ class WorkerTest {
         queues.put("default", queueConfig(1000));
         queueProperties.setQueues(queues);
 
-        worker = new Worker(taskRepository, redisBroker, new RetryPolicy(), handlerRegistry, queueProperties);
+        TaskFailureService taskFailureService = new TaskFailureService(
+                new RetryPolicy(),
+                queueProperties,
+                taskRepository,
+                redisBroker);
+        worker = new Worker(taskRepository, redisBroker, handlerRegistry, queueProperties, taskFailureService);
     }
 
     @AfterEach

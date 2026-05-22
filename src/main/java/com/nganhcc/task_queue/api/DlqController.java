@@ -52,6 +52,7 @@ public class DlqController {
         }
         task.setRunAt(null);
         task.setStartedAt(null);
+        task.setHeartbeatAt(null);
         task.setError(null);
         task.setStackTrace(null);
 

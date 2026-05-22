@@ -5,6 +5,7 @@ import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.nganhcc.task_queue.broker.RedisBroker;
@@ -52,13 +53,32 @@ public class QueueController {
         return queueState(queue);
     }
 
-    @PostMapping("/queues/{queue}/run-once")
-    public Map<String, Object> runOnce(@PathVariable String queue) {
+    @PostMapping("/queues/{queue}/drain")
+    public Map<String, Object> drain(@PathVariable String queue){
         requireQueue(queue);
+        queueControllerService.drain(queue);
+        return Map.of(
+            "queue", queue,
+            "paused", queueControllerService.isPaused(queue),
+            "draining", true
+        );
+    }
+
+    @PostMapping("/queues/{queue}/run-once")
+    public Map<String, Object> runOnce(@PathVariable String queue,
+        @RequestParam(defaultValue = "false") boolean force
+    ) {
+        requireQueue(queue);
+        boolean paused = queueControllerService.isPaused(queue);
+        if (paused && !force){
+            throw new BadRequestException("Can not run paused queue: " + queue);
+        }
         worker.runOnce(queue);
         return Map.of(
             "queue", queue,
-            "ran", true
+            "ran", true,
+            "forced", force,
+            "paused", paused
         );
     }
 

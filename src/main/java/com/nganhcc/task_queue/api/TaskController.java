@@ -58,4 +58,9 @@ public class TaskController {
     public ResponseEntity<TaskResponse> retryTask(@PathVariable UUID id){
         return ResponseEntity.ok(taskService.retryTask(id));
     }
+
+    @PostMapping("/tasks/{id}/heartbeat")
+    public ResponseEntity<TaskResponse> heartbeat(@PathVariable UUID id){
+        return ResponseEntity.ok(taskService.heartbeat(id));
+    }
 }

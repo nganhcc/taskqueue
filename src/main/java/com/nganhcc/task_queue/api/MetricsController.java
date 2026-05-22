@@ -41,9 +41,16 @@ public class MetricsController {
     public Map<String, Object> queueMetrics(){
         Map<String, Object> metrics = new HashMap<>();
         for (String queueName: queueProperties.getQueues().keySet()){
+            long readyDepth = redisBroker.queueDepth(queueName);
+            long processingDepth = redisBroker.processingDepth(queueName);
+            Boolean isPaused = redisBroker.isQueuePaused(queueName);
+            Boolean isDrained = isPaused && readyDepth==0 && processingDepth==0;
+
             metrics.put(queueName, Map.of(
-                "ready", redisBroker.queueDepth(queueName),
-                "processing", redisBroker.processingDepth(queueName)
+                "ready", readyDepth,
+                "processing", processingDepth,
+                "isPaused", isPaused,
+                "isDrained", isDrained
             ));
         }
         metrics.put("delayed", redisBroker.delayedDepth());

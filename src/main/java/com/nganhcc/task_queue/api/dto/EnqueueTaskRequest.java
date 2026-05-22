@@ -10,6 +10,7 @@ public record EnqueueTaskRequest(
         JsonNode payload,
         Instant runAt,
         Integer maxRetries,
-        Integer priority
+        Integer priority,
+        String idempotencyKey
 ) {
 }

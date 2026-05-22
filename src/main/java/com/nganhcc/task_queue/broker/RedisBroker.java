@@ -79,6 +79,35 @@ public class RedisBroker {
             }
         }
     }
+    public void removeReadyById(String queueName, UUID id){
+        String key = RedisKeys.queue(queueName);
+        Set<String> values = redisTemplate.opsForZSet().range(key, 0, -1);
+        if (values == null || values.isEmpty()){
+            return;
+        }
+        for (String json: values){
+            Task task= taskSerializer.deserialize(json);
+            if (task.getId().equals(id)){
+                redisTemplate.opsForZSet().remove(key, json);
+                return;
+            }
+        }
+    }
+
+    public void removeDelayedById(UUID id){
+        String key = RedisKeys.delayed();
+        Set<String> values = redisTemplate.opsForZSet().range(key, 0, -1);
+        if (values == null || values.isEmpty()){
+            return;
+        }
+        for (String json: values){
+            Task task= taskSerializer.deserialize(json);
+            if (task.getId().equals(id)){
+                redisTemplate.opsForZSet().remove(key, json);
+                return;
+            }
+        }
+    }
 
     public Boolean purgeQueue(String queueName){
         return redisTemplate.delete(RedisKeys.queue(queueName));

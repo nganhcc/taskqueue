@@ -51,6 +51,8 @@ class TaskControllerTest {
                 0,
                 3,
                 0,
+                null,
+                null,
                 Instant.parse("2026-05-13T12:00:00Z"),
                 null,
                 Instant.parse("2026-05-13T10:00:00Z"),
