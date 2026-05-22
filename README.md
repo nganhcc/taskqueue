@@ -4,28 +4,33 @@ A Java 21 Spring Boot task queue backed by PostgreSQL and Redis.
 
 The application exposes REST APIs for creating and inspecting tasks, stores
 durable task state in PostgreSQL, uses Redis for live queue state, and runs
-background workers that execute registered task handlers with retry and DLQ
-support.
+background workers that execute registered task handlers with retry, DLQ,
+heartbeat, idempotency, and queue-operation support.
 
 ## Features
 
 - Enqueue immediate and delayed tasks
-- Store task state, payload, result, error, and stack traces in PostgreSQL
+- Store task state, payload, result, error, stack trace, heartbeat, and
+  idempotency key in PostgreSQL
 - Use Redis for ready queues, processing queues, delayed tasks, DLQ entries,
   scheduler locks, and paused queue state
-- Per-queue concurrency and retry settings
 - Priority ordering for ready tasks
-- Atomic Redis Lua polling for ready queues
-- Lua-backed delayed queue polling
+- Atomic Redis Lua polling for ready queues and delayed tasks
 - Distributed Redis lock for delayed scheduling
 - Worker execution with Java 21 virtual threads
 - Handler timeout with retry/DLQ behavior
-- Exponential retry backoff
-- Stuck task reaper for tasks left in `RUNNING`
-- Queue pause, resume, run-once, and purge operations
+- Retry with exponential backoff, max delay cap, and jitter
+- Shared failure handling for worker failures and stuck task recovery
+- Stuck task reaper based on `heartbeatAt`
+- Task heartbeat endpoint for long-running work
+- Idempotent task creation with `idempotencyKey` and HTTP 409 conflict handling
+- Stronger task cancellation that cleans ready, delayed, and processing Redis entries
+- Dead letter queue inspection and replay with optional attempt reset
+- Queue pause, resume, drain, run-once, force run-once, and purge operations
 - Queue pause state persists in Redis across app restarts
-- Delayed/DLQ purges update matching PostgreSQL task state
-- Task, queue, and DLQ inspection APIs
+- Queue metrics include paused and drained state
+- Scheduled retention cleanup for old terminal tasks
+- Normal test suite does not require Docker services; smoke tests are opt-in
 
 ## Stack
 
@@ -38,6 +43,7 @@ support.
 - PostgreSQL 16
 - Redis 7
 - Maven
+- Jackson 3 / `tools.jackson.*`
 
 ## Quick Start
 
@@ -59,14 +65,17 @@ The API runs on:
 http://localhost:8080
 ```
 
-Run tests:
+Run normal tests:
 
 ```bash
 ./mvnw test
 ```
 
-Some tests, including smoke tests, expect PostgreSQL and Redis to be available
-on the ports from `docker-compose.yml`.
+Run smoke tests against Docker-published PostgreSQL and Redis:
+
+```bash
+./mvnw test -Dtaskqueue.smoke=true
+```
 
 ## Local Services
 
@@ -89,15 +98,25 @@ Queue settings are under `taskqueue`:
 
 ```yaml
 taskqueue:
+  retention:
+    enabled: true
+    poll-interval-ms: 3600000
+    done-retention-days: 7
+    failed-retention-days: 30
+    dead-retention-days: 30
   queues:
     high_priority:
       concurrency: 10
       max-retries: 5
       base-delay-ms: 500
+      max-delay-ms: 10000
+      jitter-percent: 0.5
     default:
       concurrency: 4
       max-retries: 3
       base-delay-ms: 1000
+      max-delay-ms: 60000
+      jitter-percent: 0.5
   worker:
     poll-interval-ms: 1000
     handler-timeout-ms: 30000
@@ -124,7 +143,8 @@ curl -i -X POST http://localhost:8080/tasks \
     "payload": {
       "message": "hello"
     },
-    "priority": 5
+    "priority": 5,
+    "idempotencyKey": "demo-log-message-1"
   }'
 ```
 
@@ -154,11 +174,12 @@ curl -i 'http://localhost:8080/tasks?queue=default&status=PENDING'
 curl -i http://localhost:8080/tasks/{id}
 ```
 
-### Cancel or retry a task
+### Operate a task
 
 ```bash
 curl -i -X POST http://localhost:8080/tasks/{id}/cancel
 curl -i -X POST http://localhost:8080/tasks/{id}/retry
+curl -i -X POST http://localhost:8080/tasks/{id}/heartbeat
 ```
 
 ### Queue operations
@@ -167,7 +188,9 @@ curl -i -X POST http://localhost:8080/tasks/{id}/retry
 curl -i http://localhost:8080/queues
 curl -i -X POST http://localhost:8080/queues/default/pause
 curl -i -X POST http://localhost:8080/queues/default/resume
+curl -i -X POST http://localhost:8080/queues/default/drain
 curl -i -X POST http://localhost:8080/queues/default/run-once
+curl -i -X POST 'http://localhost:8080/queues/default/run-once?force=true'
 curl -i -X POST http://localhost:8080/queues/default/purge
 curl -i -X POST http://localhost:8080/queues/delayed/purge
 curl -i -X POST http://localhost:8080/queues/dlq/purge
@@ -194,11 +217,11 @@ Tasks commonly move through these statuses:
 
 ```text
 PENDING -> RUNNING -> DONE
-RUNNING -> PENDING  # retry scheduled
-RUNNING -> DEAD     # retries exhausted
-PENDING/RUNNING -> FAILED  # cancelled or purged
-DEAD -> PENDING     # DLQ replay
-FAILED -> PENDING   # manual retry
+PENDING -> RUNNING -> PENDING   retry scheduled
+PENDING -> RUNNING -> DEAD      retries exhausted
+PENDING/RUNNING -> FAILED       cancel, purge, or administrative failure
+DEAD -> PENDING                 DLQ replay
+FAILED -> PENDING               manual retry
 ```
 
 Important fields:
@@ -213,8 +236,11 @@ Important fields:
 | `attempt` | Number of failed attempts so far |
 | `maxRetries` | Retry limit for the task |
 | `priority` | Higher priority tasks run first |
+| `idempotencyKey` | Optional client key for safe duplicate enqueue requests |
+| `heartbeatAt` | Last heartbeat timestamp for a running task |
 | `runAt` | Earliest execution time for delayed/retry tasks |
 | `startedAt` | Last time a worker started the task |
+| `createdAt` | Creation timestamp |
 | `result` | Handler result JSON string |
 | `error` | Last error message |
 | `stackTrace` | Last failure stack trace |
@@ -230,8 +256,6 @@ public interface TaskHandler {
 }
 ```
 
-The handler `fn()` value is matched against the task request `fn`.
-
 The current built-in handler is:
 
 ```text
@@ -243,6 +267,9 @@ It returns:
 ```json
 {"ok":true}
 ```
+
+Delivery is at-least-once. Handlers should be idempotent, usually keyed by
+`Task.id` or by the caller-provided `idempotencyKey`.
 
 ## Redis Keys
 
@@ -282,6 +309,8 @@ Current migrations:
 ```text
 V1__create_tasks.sql
 V2__add_task_priority.sql
+V3__add_task_idempotency_key.sql
+V4__add_task_heartbeat_at.sql
 ```
 
 Hibernate is configured with `ddl-auto: validate`, so schema changes should be
@@ -297,6 +326,7 @@ src/main/java/com/nganhcc/task_queue/
   exception/   API/domain exceptions
   model/       Task entity and status enum
   reaper/      Stuck task recovery
+  retention/   Terminal task cleanup
   retry/       Retry policy
   scheduler/   Delayed task scheduler
   service/     Task and queue application services
@@ -308,10 +338,8 @@ src/main/java/com/nganhcc/task_queue/
 
 - Delayed promotion atomically removes due entries from `taskqueue:delayed`, but
   DB lookup and live queue enqueue are separate steps.
-- The stuck task reaper re-enqueues stale `RUNNING` tasks without incrementing
-  `attempt` or applying retry/DLQ exhaustion rules.
-- Retry backoff has no jitter or maximum delay cap.
 - `TaskType` is currently a placeholder.
+- The project has no frontend dashboard.
 
 ## More Documentation
 
