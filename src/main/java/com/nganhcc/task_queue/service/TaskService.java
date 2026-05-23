@@ -3,12 +3,17 @@ package com.nganhcc.task_queue.service;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
+import com.nganhcc.task_queue.api.dto.PageResponse;
 import com.nganhcc.task_queue.api.dto.TaskEventResponse;
 import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.broker.RedisBroker;
@@ -30,6 +35,17 @@ import tools.jackson.databind.json.JsonMapper;
 public class TaskService {
 
     private static final String DEFAULT_QUEUE = "default";
+    private static final int DEFAULT_PAGE = 0;
+    private static final int DEFAULT_SIZE = 50;
+    private static final int MAX_SIZE = 200;
+    private static final String DEFAULT_TASK_SORT = "createdAt,desc";
+    private static final Set<String> ALLOWED_TASK_SORT_FIELDS = Set.of(
+            "createdAt",
+            "priority",
+            "status",
+            "queue",
+            "runAt",
+            "attempt");
 
     private final TaskRepository taskRepository;
     private final QueueProperties queueProperties;
@@ -96,19 +112,22 @@ public class TaskService {
         return TaskResponse.from(task, deserializePayload(task.getPayload()));
     }
 
-    public List<TaskResponse> listTasks(String queue, TaskStatus status){
-        List<Task> tasks;
+    public PageResponse<TaskResponse> listTasks(String queue, TaskStatus status, Integer page, Integer size, String sort){
+        PageRequest pageRequest = pageRequest(page, size, sort, DEFAULT_TASK_SORT, ALLOWED_TASK_SORT_FIELDS);
+        Page<Task> tasks;
         if (queue != null && status != null){
-            tasks= taskRepository.findByQueueAndStatus(queue,status);
+            tasks= taskRepository.findByQueueAndStatus(queue,status, pageRequest);
         }else if(queue!= null){
-            tasks = taskRepository.findByQueue(queue);
+            tasks = taskRepository.findByQueue(queue, pageRequest);
         }else if (status != null){
-            tasks = taskRepository.findByStatus(status);
+            tasks = taskRepository.findByStatus(status, pageRequest);
         }else {
-            tasks=taskRepository.findAll();
+            tasks=taskRepository.findAll(pageRequest);
         }
-        return tasks.stream().map(task -> TaskResponse.from(task, deserializePayload(task.getPayload())))
-        .toList();
+        List<TaskResponse> items = tasks.getContent().stream()
+                .map(task -> TaskResponse.from(task, deserializePayload(task.getPayload())))
+                .toList();
+        return PageResponse.from(tasks, items);
     }
 
     public TaskResponse cancelTask(UUID id){
@@ -193,8 +212,8 @@ public class TaskService {
         return tasks.size();
     }
 
-    public List<TaskEventResponse> listTaskEvents(UUID id) {
-        return taskEventService.listTaskEvents(id);
+    public PageResponse<TaskEventResponse> listTaskEvents(UUID id, Integer page, Integer size, String sort) {
+        return taskEventService.listTaskEvents(id, page, size, sort);
     }
     private String normalizeQueue(String queue) {
         if (queue == null || queue.isBlank()) {
@@ -312,5 +331,34 @@ public class TaskService {
         } catch (JacksonException e) {
             throw new IllegalStateException("Stored task payload is not valid JSON", e);
         }
+    }
+
+    private PageRequest pageRequest(Integer page, Integer size, String sort, String defaultSort, Set<String> allowedSortFields) {
+        int resolvedPage = page == null ? DEFAULT_PAGE : page;
+        int resolvedSize = size == null ? DEFAULT_SIZE : size;
+        if (resolvedPage < 0) {
+            throw new BadRequestException("page must be greater than or equal to 0");
+        }
+        if (resolvedSize < 1 || resolvedSize > MAX_SIZE) {
+            throw new BadRequestException("size must be between 1 and 200");
+        }
+        return PageRequest.of(resolvedPage, resolvedSize, parseSort(sort, defaultSort, allowedSortFields));
+    }
+
+    private Sort parseSort(String sort, String defaultSort, Set<String> allowedSortFields) {
+        String sortValue = sort == null || sort.isBlank() ? defaultSort : sort.trim();
+        String[] parts = sortValue.split(",", -1);
+        if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) {
+            throw new BadRequestException("sort must use format: field,direction");
+        }
+        String field = parts[0].trim();
+        String direction = parts[1].trim().toLowerCase();
+        if (!allowedSortFields.contains(field)) {
+            throw new BadRequestException("Unsupported sort field: " + field);
+        }
+        if (!direction.equals("asc") && !direction.equals("desc")) {
+            throw new BadRequestException("sort direction must be asc or desc");
+        }
+        return Sort.by(Sort.Direction.fromString(direction), field);
     }
 }

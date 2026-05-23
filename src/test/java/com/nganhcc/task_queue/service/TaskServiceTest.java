@@ -15,8 +15,12 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
+import com.nganhcc.task_queue.api.dto.PageResponse;
 import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.config.QueueProperties;
@@ -219,6 +223,65 @@ class TaskServiceTest {
         verify(redisBroker).enqueueDelayed(taskCaptor.capture());
         verify(redisBroker, never()).enqueue(any(Task.class));
         assertThat(taskCaptor.getValue().getRunAt()).isEqualTo(runAt);
+    }
+
+    @Test
+    void listTasksUsesDefaultPaginationAndNewestFirstSort() {
+        Task task = new Task(null, "default", "send_email", "{}", 3, 0, null);
+        when(taskRepository.findAll(any(Pageable.class))).thenReturn(new PageImpl<>(List.of(task)));
+
+        PageResponse<TaskResponse> response = taskService.listTasks(null, null, null, null, null);
+
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(taskRepository).findAll(pageableCaptor.capture());
+        Pageable pageable = pageableCaptor.getValue();
+        assertThat(pageable.getPageNumber()).isZero();
+        assertThat(pageable.getPageSize()).isEqualTo(50);
+        Sort.Order order = pageable.getSort().getOrderFor("createdAt");
+        assertThat(order).isNotNull();
+        assertThat(order.getDirection()).isEqualTo(Sort.Direction.DESC);
+        assertThat(response.items()).hasSize(1);
+    }
+
+    @Test
+    void listTasksAppliesQueueStatusAndCustomSort() {
+        Task task = new Task(null, "default", "send_email", "{}", 3, 7, null);
+        when(taskRepository.findByQueueAndStatus(any(String.class), any(TaskStatus.class), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(task)));
+
+        PageResponse<TaskResponse> response = taskService.listTasks("default", TaskStatus.PENDING, 1, 25, "priority,desc");
+
+        ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
+        verify(taskRepository).findByQueueAndStatus(
+                org.mockito.ArgumentMatchers.eq("default"),
+                org.mockito.ArgumentMatchers.eq(TaskStatus.PENDING),
+                pageableCaptor.capture());
+        Pageable pageable = pageableCaptor.getValue();
+        assertThat(pageable.getPageNumber()).isEqualTo(1);
+        assertThat(pageable.getPageSize()).isEqualTo(25);
+        Sort.Order order = pageable.getSort().getOrderFor("priority");
+        assertThat(order).isNotNull();
+        assertThat(order.getDirection()).isEqualTo(Sort.Direction.DESC);
+        assertThat(response.items().getFirst().priority()).isEqualTo(7);
+    }
+
+    @Test
+    void listTasksRejectsInvalidPaginationAndSort() {
+        assertThatThrownBy(() -> taskService.listTasks(null, null, -1, 50, null))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("page must be greater than or equal to 0");
+
+        assertThatThrownBy(() -> taskService.listTasks(null, null, 0, 0, null))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("size must be between 1 and 200");
+
+        assertThatThrownBy(() -> taskService.listTasks(null, null, 0, 50, "fn,asc"))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("Unsupported sort field: fn");
+
+        assertThatThrownBy(() -> taskService.listTasks(null, null, 0, 50, "createdAt,newest"))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("sort direction must be asc or desc");
     }
 
     @Test

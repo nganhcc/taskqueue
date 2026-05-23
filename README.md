@@ -24,6 +24,8 @@ heartbeat, idempotency, and queue-operation support.
 - Stuck task reaper based on `heartbeatAt`
 - Task heartbeat endpoint for long-running work
 - Persistent task execution history with `GET /tasks/{id}/events`
+- Paginated task and task-event listing with bounded page size and validated
+  sorting
 - Idempotent task creation with `idempotencyKey` and HTTP 409 conflict handling
 - Stronger task cancellation that cleans ready, delayed, and processing Redis entries
 - Dead letter queue inspection and replay with optional attempt reset
@@ -168,12 +170,26 @@ curl -i -X POST http://localhost:8080/tasks \
 ### List and inspect tasks
 
 ```bash
-curl -i http://localhost:8080/tasks
-curl -i 'http://localhost:8080/tasks?queue=default'
-curl -i 'http://localhost:8080/tasks?status=PENDING'
-curl -i 'http://localhost:8080/tasks?queue=default&status=PENDING'
+curl -i 'http://localhost:8080/tasks?page=0&size=50&sort=createdAt,desc'
+curl -i 'http://localhost:8080/tasks?queue=default&page=0&size=50'
+curl -i 'http://localhost:8080/tasks?status=PENDING&page=0&size=50'
+curl -i 'http://localhost:8080/tasks?queue=default&status=PENDING&page=0&size=50&sort=priority,desc'
 curl -i http://localhost:8080/tasks/{id}
-curl -i http://localhost:8080/tasks/{id}/events
+curl -i 'http://localhost:8080/tasks/{id}/events?page=0&size=50&sort=createdAt,asc'
+```
+
+List endpoints for tasks and task events return:
+
+```json
+{
+  "items": [],
+  "page": 0,
+  "size": 50,
+  "totalElements": 0,
+  "totalPages": 0,
+  "first": true,
+  "last": true
+}
 ```
 
 ### Operate a task
