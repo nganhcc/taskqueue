@@ -8,9 +8,9 @@ codebase changes.
 `task-queue` is a Java 21 Spring Boot 4.0.6 backend for a Redis/PostgreSQL task
 queue.
 
-Current implementation is a working backend foundation:
+Current implementation is a feature-complete backend foundation:
 
-- REST APIs for tasks, queues, DLQ, and basic metrics
+- REST APIs for tasks, queues, DLQ, and metrics
 - PostgreSQL durable task storage through Spring Data JPA and Flyway
 - Redis live queue state through `RedisTemplate<String, String>`
 - Immediate queues with priority ordering
@@ -18,12 +18,17 @@ Current implementation is a working backend foundation:
 - Atomic Redis Lua polling for ready and delayed queues
 - Distributed Redis lock around delayed scheduling
 - Worker polling and handler execution on Java virtual threads
-- Handler timeout with retry/DLQ handling
-- Retry with exponential backoff
+- Handler timeout with shared retry/DLQ failure handling
+- Retry with exponential backoff, max delay cap, and jitter
 - Dead letter queue replay with optional attempt reset
-- Stuck task reaper
+- Stuck task reaper based on `heartbeatAt`
+- Task heartbeat endpoint
 - Redis-backed persistent queue pause state
+- Queue pause, resume, drain, run-once, force run-once, and purge operations
 - Queue, delayed, and DLQ purge operations that update DB task state
+- Queue metrics with paused and drained state
+- Idempotent task creation with `idempotencyKey` and HTTP 409 conflict handling
+- Scheduled retention cleanup for old terminal tasks
 - Focused controller, service, broker, scheduler, and worker tests
 
 There is no React dashboard in this repository yet.
@@ -55,6 +60,7 @@ src/main/java/com/nganhcc/task_queue/
   exception/        domain/API exceptions
   model/            JPA task entity and status enum
   reaper/           stuck RUNNING task recovery
+  retention/        terminal task cleanup
   retry/            retry decision and backoff calculation
   scheduler/        delayed task promotion
   service/          task and queue orchestration
@@ -81,12 +87,13 @@ High-level flow:
 
 ```text
 POST /tasks
-  -> TaskService validates and stores a PENDING Task in PostgreSQL
+  -> TaskService validates, handles idempotency, and stores a PENDING task
   -> RedisBroker enqueues now, or puts future runAt tasks into taskqueue:delayed
   -> WorkerBootstrap schedules per-queue virtual-thread worker submissions
-  -> Worker polls Redis, loads the DB task, marks RUNNING, executes handler
+  -> Worker polls Redis, loads the DB task, marks RUNNING, sets heartbeatAt
+  -> handler executes with timeout
   -> success marks DONE
-  -> failure either schedules retry or marks DEAD and writes to DLQ
+  -> failure routes through TaskFailureService for retry or DLQ
 ```
 
 Handlers implement:
@@ -113,11 +120,14 @@ GET /tasks?queue=default&status=PENDING
 GET /tasks/{id}
 POST /tasks/{id}/cancel
 POST /tasks/{id}/retry
+POST /tasks/{id}/heartbeat
 
 GET /queues
 POST /queues/{queue}/pause
 POST /queues/{queue}/resume
+POST /queues/{queue}/drain
 POST /queues/{queue}/run-once
+POST /queues/{queue}/run-once?force=true
 POST /queues/{queue}/purge
 POST /queues/delayed/purge
 POST /queues/dlq/purge
@@ -141,8 +151,9 @@ Queue config is bound by `QueueProperties` with:
 ```
 
 Use the `taskqueue` prefix consistently. YAML uses kebab-case fields such as
-`max-retries`, `base-delay-ms`, `handler-timeout-ms`, `poll-interval-ms`, and
-`lock-ttl-ms`; Java uses camelCase.
+`max-retries`, `base-delay-ms`, `max-delay-ms`, `jitter-percent`,
+`handler-timeout-ms`, `poll-interval-ms`, and `lock-ttl-ms`; Java uses
+camelCase.
 
 Configured queues currently include:
 
@@ -154,6 +165,8 @@ Each queue supports:
 - `concurrency`
 - `maxRetries`
 - `baseDelayMs`
+- `maxDelayMs`
+- `jitterPercent`
 
 Worker config supports:
 
@@ -170,6 +183,14 @@ Reaper config supports:
 - `stuckThresholdMinutes`
 - `pollIntervalMs`
 
+Retention config supports:
+
+- `enabled`
+- `pollIntervalMs`
+- `doneRetentionDays`
+- `failedRetentionDays`
+- `deadRetentionDays`
+
 ## Database Rules
 
 Flyway migrations live in `src/main/resources/db/migration/`.
@@ -185,6 +206,8 @@ Current migrations:
 
 - `V1__create_tasks.sql`
 - `V2__add_task_priority.sql`
+- `V3__add_task_idempotency_key.sql`
+- `V4__add_task_heartbeat_at.sql`
 
 Current `TaskStatus` values:
 
@@ -195,6 +218,25 @@ DONE
 FAILED
 DEAD
 ```
+
+Important `Task` fields include:
+
+- `id`
+- `queue`
+- `fn`
+- `payload`
+- `status`
+- `attempt`
+- `maxRetries`
+- `priority`
+- `idempotencyKey`
+- `heartbeatAt`
+- `runAt`
+- `startedAt`
+- `createdAt`
+- `result`
+- `error`
+- `stackTrace`
 
 ## Redis Conventions
 
@@ -230,20 +272,21 @@ Keep these in mind when extending the system:
 
 - Delayed promotion atomically removes from `taskqueue:delayed`, but DB lookup
   and live queue enqueue are still separate operations.
-- The stuck task reaper always re-enqueues stale `RUNNING` tasks and does not
-  increment `attempt` or route through retry/DLQ exhaustion logic.
-- Retry backoff has no jitter or max-delay cap.
 - `TaskType` currently exists as a placeholder with no behavior.
 - Handlers must be idempotent because delivery is at-least-once in design and
   duplicates are possible.
+- There is no dashboard/frontend in this repository.
 
 ## Coding Guidance
 
 - Read the relevant package and focused tests before changing behavior.
 - Prefer local patterns over introducing new abstractions.
-- Keep controllers thin; put orchestration in services or broker/worker classes.
-- Validate API inputs in `TaskService` or controller-adjacent exception handling.
-- Use `BadRequestException` for 400-style domain validation errors.
+- Keep controllers thin; put orchestration in services, broker, scheduler, or
+  worker classes.
+- Validate API inputs in `TaskService` or controller-adjacent exception
+  handling.
+- Use `BadRequestException` for 400-style validation errors.
+- Use `ConflictException` for 409 conflicts such as idempotency key mismatches.
 - Preserve JSON payloads as JSON text in PostgreSQL and JSON nodes in API DTOs.
 - When acknowledging a processing item, use the Redis payload that was polled,
   not a later mutated DB copy.
@@ -259,14 +302,14 @@ docker compose up -d
 # Run the app
 ./mvnw spring-boot:run
 
-# Run all tests
+# Run normal tests; smoke tests are skipped unless enabled
 ./mvnw test
+
+# Run smoke tests, requires PostgreSQL and Redis from docker-compose
+./mvnw test -Dtaskqueue.smoke=true
 
 # Run focused backend tests
 ./mvnw test -Dtest=DlqControllerTest,QueueControllerTest,DelayedTaskSchedulerTest,WorkerTest,TaskServiceTest,QueueControllerServiceTest,RedisBrokerTest,TaskControllerTest
-
-# Run smoke tests, requires PostgreSQL and Redis from docker-compose
-./mvnw test -Dtest=SmokeTest
 ```
 
 Local services from `docker-compose.yml`:
