@@ -23,6 +23,7 @@ Current implementation is a feature-complete backend foundation:
 - Dead letter queue replay with optional attempt reset
 - Stuck task reaper based on `heartbeatAt`
 - Task heartbeat endpoint
+- Persistent task execution history with `GET /tasks/{id}/events`
 - Redis-backed persistent queue pause state
 - Queue pause, resume, drain, run-once, force run-once, and purge operations
 - Queue, delayed, and DLQ purge operations that update DB task state
@@ -118,6 +119,7 @@ GET /tasks?queue=default
 GET /tasks?status=PENDING
 GET /tasks?queue=default&status=PENDING
 GET /tasks/{id}
+GET /tasks/{id}/events
 POST /tasks/{id}/cancel
 POST /tasks/{id}/retry
 POST /tasks/{id}/heartbeat
@@ -208,6 +210,7 @@ Current migrations:
 - `V2__add_task_priority.sql`
 - `V3__add_task_idempotency_key.sql`
 - `V4__add_task_heartbeat_at.sql`
+- `V5__create_task_events.sql`
 
 Current `TaskStatus` values:
 

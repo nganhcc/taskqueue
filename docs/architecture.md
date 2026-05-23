@@ -112,6 +112,14 @@ DEAD -> PENDING                 DLQ replay
 FAILED -> PENDING               manual task retry
 ```
 
+Task execution history is stored in `task_events`. Events are append-only rows
+keyed by `task_id` and include event type, attempt number, message, error,
+stack trace, and creation time. The API exposes them through:
+
+```http
+GET /tasks/{id}/events
+```
+
 ## Enqueue Flow
 
 `POST /tasks` calls `TaskService.enqueue`.
@@ -408,6 +416,7 @@ GET /tasks?queue={queue}
 GET /tasks?status={status}
 GET /tasks?queue={queue}&status={status}
 GET /tasks/{id}
+GET /tasks/{id}/events
 POST /tasks/{id}/cancel
 POST /tasks/{id}/retry
 POST /tasks/{id}/heartbeat
@@ -455,6 +464,7 @@ V1__create_tasks.sql
 V2__add_task_priority.sql
 V3__add_task_idempotency_key.sql
 V4__add_task_heartbeat_at.sql
+V5__create_task_events.sql
 ```
 
 `tasks` has indexes for status, queue/status, pending `run_at`, running
@@ -511,11 +521,10 @@ taskqueue:
 
 These are the main architecture improvements still open:
 
-1. Consider a more transactional delayed promotion strategy across Redis and DB
-   if stronger guarantees are needed.
+1. Delayed promotion is reconciled from PostgreSQL if a Redis delayed entry is
+   removed before live enqueue completes, but the Redis and DB writes are still
+   not a single transaction.
 2. Remove `TaskType` or turn it into a real enum/value object.
-3. Add richer task execution history if debugging needs attempt-by-attempt
-   events instead of only the latest error/result on the task row.
 
 ## Design Decisions
 

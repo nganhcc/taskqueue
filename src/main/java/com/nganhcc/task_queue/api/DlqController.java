@@ -13,7 +13,9 @@ import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.exception.TaskNotFoundException;
 import com.nganhcc.task_queue.model.Task;
+import com.nganhcc.task_queue.model.TaskEventType;
 import com.nganhcc.task_queue.model.TaskStatus;
+import com.nganhcc.task_queue.service.TaskEventService;
 import com.nganhcc.task_queue.store.TaskRepository;
 
 import tools.jackson.core.JacksonException;
@@ -25,11 +27,13 @@ public class DlqController {
     private final RedisBroker redisBroker;
     private final TaskRepository taskRepository;
     private final JsonMapper jsonMapper;
+    private final TaskEventService taskEventService;
 
-    public DlqController(RedisBroker redisBroker, JsonMapper jsonMapper, TaskRepository taskRepository) {
+    public DlqController(RedisBroker redisBroker, JsonMapper jsonMapper, TaskRepository taskRepository, TaskEventService taskEventService) {
         this.redisBroker = redisBroker;
         this.taskRepository = taskRepository;
         this.jsonMapper = jsonMapper;
+        this.taskEventService = taskEventService;
     }
 
     @GetMapping("/dlq")
@@ -58,6 +62,7 @@ public class DlqController {
 
         Task saved = taskRepository.save(task);
         redisBroker.enqueue(saved);
+        taskEventService.record(saved, TaskEventType.DLQ_REPLAYED, "Task replayed from DLQ");
 
         return TaskResponse.from(saved, deserializePayload(saved));
     }

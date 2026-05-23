@@ -23,6 +23,7 @@ heartbeat, idempotency, and queue-operation support.
 - Shared failure handling for worker failures and stuck task recovery
 - Stuck task reaper based on `heartbeatAt`
 - Task heartbeat endpoint for long-running work
+- Persistent task execution history with `GET /tasks/{id}/events`
 - Idempotent task creation with `idempotencyKey` and HTTP 409 conflict handling
 - Stronger task cancellation that cleans ready, delayed, and processing Redis entries
 - Dead letter queue inspection and replay with optional attempt reset
@@ -172,6 +173,7 @@ curl -i 'http://localhost:8080/tasks?queue=default'
 curl -i 'http://localhost:8080/tasks?status=PENDING'
 curl -i 'http://localhost:8080/tasks?queue=default&status=PENDING'
 curl -i http://localhost:8080/tasks/{id}
+curl -i http://localhost:8080/tasks/{id}/events
 ```
 
 ### Operate a task
@@ -311,6 +313,7 @@ V1__create_tasks.sql
 V2__add_task_priority.sql
 V3__add_task_idempotency_key.sql
 V4__add_task_heartbeat_at.sql
+V5__create_task_events.sql
 ```
 
 Hibernate is configured with `ddl-auto: validate`, so schema changes should be
@@ -336,8 +339,9 @@ src/main/java/com/nganhcc/task_queue/
 
 ## Known Limitations
 
-- Delayed promotion atomically removes due entries from `taskqueue:delayed`, but
-  DB lookup and live queue enqueue are separate steps.
+- Delayed promotion is reconciled from PostgreSQL if a Redis delayed entry is
+  removed before live enqueue completes, but Redis and DB writes are still not a
+  single transaction.
 - `TaskType` is currently a placeholder.
 - The project has no frontend dashboard.
 

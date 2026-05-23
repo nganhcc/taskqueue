@@ -10,6 +10,7 @@ import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.config.QueueProperties;
 import com.nganhcc.task_queue.config.QueueProperties.QueueConfig;
 import com.nganhcc.task_queue.model.Task;
+import com.nganhcc.task_queue.model.TaskEventType;
 import com.nganhcc.task_queue.model.TaskStatus;
 import com.nganhcc.task_queue.retry.RetryPolicy;
 import com.nganhcc.task_queue.store.TaskRepository;
@@ -20,12 +21,14 @@ public class TaskFailureService {
     private final QueueProperties queueProperties;
     private final TaskRepository taskRepository;
     private final RedisBroker redisBroker;
+    private final TaskEventService taskEventService;
 
-    public TaskFailureService(RetryPolicy retryPolicy, QueueProperties queueProperties, TaskRepository taskRepository, RedisBroker redisBroker){
+    public TaskFailureService(RetryPolicy retryPolicy, QueueProperties queueProperties, TaskRepository taskRepository, RedisBroker redisBroker, TaskEventService taskEventService){
         this.retryPolicy=retryPolicy;
         this.queueProperties=queueProperties;
         this.taskRepository=taskRepository;
         this.redisBroker=redisBroker;
+        this.taskEventService=taskEventService;
     }
     public void handleFailure(Task task, RuntimeException e){
         task.setAttempt(task.getAttempt()+1);
@@ -40,11 +43,15 @@ public class TaskFailureService {
             task.setStatus(TaskStatus.PENDING);
             taskRepository.save(task);
 
+            taskEventService.record(task, TaskEventType.FAILED, "Task execution failed");
             redisBroker.enqueueDelayed(task);
+            taskEventService.record(task, TaskEventType.RETRY_SCHEDULED, "Retry scheduled");
         }else{
             task.setStatus(TaskStatus.DEAD);
             taskRepository.save(task);
+            taskEventService.record(task, TaskEventType.FAILED, "Task execution failed");
             redisBroker.sendToDlq(task);
+            taskEventService.record(task, TaskEventType.DEAD_LETTERED, "Task moved to DLQ");
         }
     }
 

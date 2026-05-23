@@ -24,6 +24,7 @@ import com.nganhcc.task_queue.config.QueueProperties.QueueConfig;
 import com.nganhcc.task_queue.model.Task;
 import com.nganhcc.task_queue.model.TaskStatus;
 import com.nganhcc.task_queue.retry.RetryPolicy;
+import com.nganhcc.task_queue.service.TaskEventService;
 import com.nganhcc.task_queue.service.TaskFailureService;
 import com.nganhcc.task_queue.store.TaskRepository;
 
@@ -34,6 +35,7 @@ class WorkerTest {
     private HandlerRegistry handlerRegistry;
     private TaskHandler taskHandler;
     private QueueProperties queueProperties;
+    private TaskEventService taskEventService;
     private Worker worker;
 
     @BeforeEach
@@ -42,6 +44,7 @@ class WorkerTest {
         redisBroker = mock(RedisBroker.class);
         handlerRegistry = mock(HandlerRegistry.class);
         taskHandler = mock(TaskHandler.class);
+        taskEventService = mock(TaskEventService.class);
 
         queueProperties = new QueueProperties();
         HashMap<String, QueueConfig> queues = new HashMap<>();
@@ -52,8 +55,9 @@ class WorkerTest {
                 new RetryPolicy(),
                 queueProperties,
                 taskRepository,
-                redisBroker);
-        worker = new Worker(taskRepository, redisBroker, handlerRegistry, queueProperties, taskFailureService);
+                redisBroker,
+                taskEventService);
+        worker = new Worker(taskRepository, redisBroker, handlerRegistry, queueProperties, taskFailureService, taskEventService);
     }
 
     @AfterEach
