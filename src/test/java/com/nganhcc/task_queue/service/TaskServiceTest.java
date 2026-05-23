@@ -35,12 +35,14 @@ class TaskServiceTest {
 
     private TaskRepository taskRepository;
     private RedisBroker redisBroker;
+    private TaskEventService taskEventService;
     private TaskService taskService;
 
     @BeforeEach
     void setUp() {
         taskRepository = mock(TaskRepository.class);
         redisBroker = mock(RedisBroker.class);
+        taskEventService = mock(TaskEventService.class);
         when(taskRepository.save(any(Task.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         QueueProperties queueProperties = new QueueProperties();
@@ -49,7 +51,7 @@ class TaskServiceTest {
         queues.put("high_priority", queueConfig(5));
         queueProperties.setQueues(queues);
 
-        taskService = new TaskService(taskRepository, queueProperties, jsonMapper, redisBroker);
+        taskService = new TaskService(taskRepository, queueProperties, jsonMapper, redisBroker, taskEventService);
     }
 
     @Test

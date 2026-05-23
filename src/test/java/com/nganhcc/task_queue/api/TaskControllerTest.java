@@ -2,12 +2,14 @@ package com.nganhcc.task_queue.api;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -18,8 +20,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
+import com.nganhcc.task_queue.api.dto.TaskEventResponse;
 import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.exception.BadRequestException;
+import com.nganhcc.task_queue.model.TaskEventType;
 import com.nganhcc.task_queue.model.TaskStatus;
 import com.nganhcc.task_queue.service.TaskService;
 
@@ -97,5 +101,28 @@ class TaskControllerTest {
                         """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("fn is required"));
+    }
+
+    @Test
+    void listTaskEventsReturnsEvents() throws Exception {
+        UUID taskId = UUID.fromString("9f3a1b2c-0000-0000-0000-000000000000");
+        UUID eventId = UUID.fromString("aaaaaaaa-0000-0000-0000-000000000001");
+        when(taskService.listTaskEvents(taskId)).thenReturn(List.of(new TaskEventResponse(
+                eventId,
+                taskId,
+                TaskEventType.CREATED,
+                0,
+                "Task created",
+                null,
+                null,
+                Instant.parse("2026-05-13T10:00:00Z"))));
+
+        mockMvc.perform(get("/tasks/{id}/events", taskId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(eventId.toString()))
+                .andExpect(jsonPath("$[0].taskId").value(taskId.toString()))
+                .andExpect(jsonPath("$[0].type").value("CREATED"))
+                .andExpect(jsonPath("$[0].attempt").value(0))
+                .andExpect(jsonPath("$[0].message").value("Task created"));
     }
 }

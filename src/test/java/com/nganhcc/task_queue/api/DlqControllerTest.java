@@ -20,6 +20,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.model.Task;
 import com.nganhcc.task_queue.model.TaskStatus;
+import com.nganhcc.task_queue.service.TaskEventService;
 import com.nganhcc.task_queue.store.TaskRepository;
 
 @WebMvcTest(DlqController.class)
@@ -33,6 +34,9 @@ class DlqControllerTest {
 
     @MockitoBean
     private TaskRepository taskRepository;
+
+    @MockitoBean
+    private TaskEventService taskEventService;
 
     @Test
     void replayKeepsAttemptCountByDefault() throws Exception {

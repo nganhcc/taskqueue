@@ -9,6 +9,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
+import com.nganhcc.task_queue.api.dto.TaskEventResponse;
 import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.config.QueueProperties;
@@ -17,6 +18,7 @@ import com.nganhcc.task_queue.exception.BadRequestException;
 import com.nganhcc.task_queue.exception.ConflictException;
 import com.nganhcc.task_queue.exception.TaskNotFoundException;
 import com.nganhcc.task_queue.model.Task;
+import com.nganhcc.task_queue.model.TaskEventType;
 import com.nganhcc.task_queue.model.TaskStatus;
 import com.nganhcc.task_queue.store.TaskRepository;
 
@@ -33,12 +35,14 @@ public class TaskService {
     private final QueueProperties queueProperties;
     private final JsonMapper jsonMapper;
     private final RedisBroker redisBroker;
+    private final TaskEventService taskEventService;
 
-    public TaskService(TaskRepository taskRepository, QueueProperties queueProperties, JsonMapper jsonMapper, RedisBroker redisBroker) {
+    public TaskService(TaskRepository taskRepository, QueueProperties queueProperties, JsonMapper jsonMapper, RedisBroker redisBroker, TaskEventService taskEventService) {
         this.taskRepository = taskRepository;
         this.queueProperties = queueProperties;
         this.jsonMapper = jsonMapper;
         this.redisBroker= redisBroker;
+        this.taskEventService = taskEventService;
     }
 
     public TaskResponse enqueue(EnqueueTaskRequest request) {
@@ -82,6 +86,7 @@ public class TaskService {
         }else{
             redisBroker.enqueueDelayed(saved);
         };
+        taskEventService.record(saved, TaskEventType.CREATED, "Task created");
 
         return TaskResponse.from(saved, deserializePayload(saved.getPayload()));
     }
@@ -124,6 +129,7 @@ public class TaskService {
         if (oldStatus==TaskStatus.RUNNING){
             redisBroker.removeProcessingById(task.getQueue(), task.getId());
         }
+        taskEventService.record(saved, TaskEventType.CANCELLED, "Task cancelled");
         return TaskResponse.from(saved, deserializePayload(saved.getPayload()));
     }
 
@@ -140,6 +146,7 @@ public class TaskService {
         task.setStackTrace(null);
         Task saved= taskRepository.save(task);
         redisBroker.enqueue(saved);
+        taskEventService.record(saved, TaskEventType.MANUAL_RETRY, "Task manually retried");
         return TaskResponse.from(saved, deserializePayload(saved.getPayload()));
     }
 
@@ -155,6 +162,7 @@ public class TaskService {
             task.setHeartbeatAt(null);
         }
         taskRepository.saveAll(tasks);
+        tasks.forEach(task -> taskEventService.record(task, TaskEventType.QUEUE_PURGED, "Queue purged"));
         return tasks.size();
     }
 
@@ -168,6 +176,7 @@ public class TaskService {
             task.setHeartbeatAt(null);
         }
         taskRepository.saveAll(tasks);
+        tasks.forEach(task -> taskEventService.record(task, TaskEventType.DELAYED_PURGED, "Delayed queue purged"));
         return tasks.size();
     }
 
@@ -180,7 +189,12 @@ public class TaskService {
             task.setHeartbeatAt(null);
         }
         taskRepository.saveAll(tasks);
+        tasks.forEach(task -> taskEventService.record(task, TaskEventType.DLQ_PURGED, "DLQ purged"));
         return tasks.size();
+    }
+
+    public List<TaskEventResponse> listTaskEvents(UUID id) {
+        return taskEventService.listTaskEvents(id);
     }
     private String normalizeQueue(String queue) {
         if (queue == null || queue.isBlank()) {

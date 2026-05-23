@@ -34,21 +34,46 @@ public class DelayedTaskScheduler {
             return;
         }
         try{
-            while (true){
-                Task delayedTask = redisBroker.pollReadyDelayed(Instant.now());
-                if (delayedTask == null){
-                    return;
-                }
-                Task dbTask = taskRepository.findById(delayedTask.getId()).orElse(null);
-                if (dbTask == null || dbTask.getStatus() != TaskStatus.PENDING){
-                    continue;
-                }
-                dbTask.setRunAt(null);
-                Task saved = taskRepository.save(dbTask);
-                redisBroker.enqueue(saved);
-            }
+            promoteRedisDelayedTasks();
+            reconcileDueDelayedTasks();
         }finally{
             redisBroker.releaseSchedulerLock(lockToken);
         }
+    }
+
+    private void promoteRedisDelayedTasks() {
+        while (true){
+            Instant now = Instant.now();
+            Task delayedTask = redisBroker.pollReadyDelayed(now);
+            if (delayedTask == null){
+                return;
+            }
+            promoteDueTask(delayedTask.getId(), now);
+        }
+    }
+
+    private void reconcileDueDelayedTasks() {
+        Instant now = Instant.now();
+        for (Task task : taskRepository.findByStatusAndRunAtLessThanEqual(TaskStatus.PENDING, now)){
+            redisBroker.removeDelayedById(task.getId());
+            promoteDueTask(task.getId(), now);
+        }
+    }
+
+    private void promoteDueTask(UUID taskId, Instant now) {
+        Task dbTask = taskRepository.findById(taskId).orElse(null);
+        if (dbTask == null){
+            return;
+        }
+        promoteDueTask(dbTask, now);
+    }
+
+    private void promoteDueTask(Task task, Instant now) {
+        if (task.getStatus() != TaskStatus.PENDING || task.getRunAt() == null || task.getRunAt().isAfter(now)){
+            return;
+        }
+        redisBroker.enqueue(task);
+        task.setRunAt(null);
+        taskRepository.save(task);
     }
 }

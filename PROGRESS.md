@@ -110,6 +110,7 @@ src/main/resources/db/migration/V1__create_tasks.sql
 src/main/resources/db/migration/V2__add_task_priority.sql
 src/main/resources/db/migration/V3__add_task_idempotency_key.sql
 src/main/resources/db/migration/V4__add_task_heartbeat_at.sql
+src/main/resources/db/migration/V5__create_task_events.sql
 ```
 
 `Task` fields currently include:
@@ -163,6 +164,7 @@ GET /tasks?queue=default
 GET /tasks?status=PENDING
 GET /tasks?queue=default&status=PENDING
 GET /tasks/{id}
+GET /tasks/{id}/events
 POST /tasks/{id}/cancel
 POST /tasks/{id}/retry
 POST /tasks/{id}/heartbeat
@@ -205,6 +207,14 @@ Heartbeat behavior:
 - only allows `RUNNING` tasks
 - updates `heartbeatAt` to now
 - returns the updated task
+
+Task event behavior:
+
+- records task creation, start, success, failure, retry scheduling, DLQ move,
+  cancellation, manual retry, DLQ replay, and purge events
+- stores event type, attempt, message, error, stack trace, and creation time in
+  PostgreSQL `task_events`
+- exposes ordered history through `GET /tasks/{id}/events`
 
 ### Error Handling
 
@@ -500,7 +510,7 @@ docker compose up -d
 Latest verification:
 
 ```text
-Tests run: 52, Failures: 0, Errors: 0, Skipped: 3
+Tests run: 57, Failures: 0, Errors: 0, Skipped: 3
 ```
 
 ## Manual API Examples

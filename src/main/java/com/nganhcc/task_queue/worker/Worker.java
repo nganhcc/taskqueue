@@ -13,7 +13,9 @@ import org.springframework.stereotype.Component;
 import com.nganhcc.task_queue.broker.RedisBroker;
 import com.nganhcc.task_queue.config.QueueProperties;
 import com.nganhcc.task_queue.model.Task;
+import com.nganhcc.task_queue.model.TaskEventType;
 import com.nganhcc.task_queue.model.TaskStatus;
+import com.nganhcc.task_queue.service.TaskEventService;
 import com.nganhcc.task_queue.service.TaskFailureService;
 import com.nganhcc.task_queue.store.TaskRepository;
 
@@ -28,13 +30,15 @@ public class Worker {
     private final HandlerRegistry handlerRegistry;
     private final ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
     private final TaskFailureService taskFailureService;
+    private final TaskEventService taskEventService;
 
-    public Worker(TaskRepository taskRepository, RedisBroker redisBroker, HandlerRegistry handlerRegistry, QueueProperties queueProperties, TaskFailureService taskFailureService){
+    public Worker(TaskRepository taskRepository, RedisBroker redisBroker, HandlerRegistry handlerRegistry, QueueProperties queueProperties, TaskFailureService taskFailureService, TaskEventService taskEventService){
         this.taskRepository= taskRepository;
         this.queueProperties=queueProperties;
         this.redisBroker= redisBroker;
         this.handlerRegistry= handlerRegistry;
         this.taskFailureService=taskFailureService;
+        this.taskEventService=taskEventService;
     }
 
     public void runOnce(String queueName){
@@ -55,6 +59,7 @@ public class Worker {
         task.setStartedAt(now);
         task.setHeartbeatAt(now);
         taskRepository.save(task);
+        taskEventService.record(task, TaskEventType.STARTED, "Task started");
 
         TaskHandler taskHandler = handlerRegistry.get(task.getFn());
         Future<String> future =null;
@@ -69,6 +74,7 @@ public class Worker {
             fresh.setResult(result);
             fresh.setHeartbeatAt(null);
             taskRepository.save(fresh);
+            taskEventService.record(fresh, TaskEventType.SUCCEEDED, "Task completed");
         }catch(TimeoutException e ){
             future.cancel(true);
             Task fresh = taskRepository.findById(polledTask.getId()).orElseThrow(()-> new IllegalStateException("Task not found: "+polledTask.getId()));

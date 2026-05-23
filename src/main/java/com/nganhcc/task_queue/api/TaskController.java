@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
+import com.nganhcc.task_queue.api.dto.TaskEventResponse;
 import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.model.TaskStatus;
 import com.nganhcc.task_queue.service.TaskService;
@@ -47,6 +48,11 @@ public class TaskController {
     public ResponseEntity<TaskResponse> getTask(@PathVariable UUID id){
         TaskResponse response = taskService.getTask(id);
         return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/tasks/{id}/events")
+    public ResponseEntity<List<TaskEventResponse>> listTaskEvents(@PathVariable UUID id){
+        return ResponseEntity.ok(taskService.listTaskEvents(id));
     }
 
     @PostMapping("/tasks/{id}/cancel")
