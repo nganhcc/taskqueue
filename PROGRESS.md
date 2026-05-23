@@ -208,6 +208,15 @@ Heartbeat behavior:
 - updates `heartbeatAt` to now
 - returns the updated task
 
+List behavior:
+
+- task and task-event listing return paginated response objects with `items`,
+  `page`, `size`, `totalElements`, `totalPages`, `first`, and `last`
+- `page` defaults to `0`, `size` defaults to `50`, and `size` is capped at
+  `200`
+- task listings default to `createdAt,desc`; task-event listings default to
+  `createdAt,asc`
+
 Task event behavior:
 
 - records task creation, start, success, failure, retry scheduling, DLQ move,
@@ -510,7 +519,7 @@ docker compose up -d
 Latest verification:
 
 ```text
-Tests run: 57, Failures: 0, Errors: 0, Skipped: 3
+Tests run: 64, Failures: 0, Errors: 0, Skipped: 3
 ```
 
 ## Manual API Examples
@@ -557,7 +566,9 @@ curl -i -X POST http://localhost:8080/tasks \
 Task operations:
 
 ```bash
+curl -i 'http://localhost:8080/tasks?page=0&size=50&sort=createdAt,desc'
 curl -i http://localhost:8080/tasks/{id}
+curl -i 'http://localhost:8080/tasks/{id}/events?page=0&size=50&sort=createdAt,asc'
 curl -i -X POST http://localhost:8080/tasks/{id}/heartbeat
 curl -i -X POST http://localhost:8080/tasks/{id}/cancel
 curl -i -X POST http://localhost:8080/tasks/{id}/retry

@@ -439,6 +439,11 @@ GET /metrics/tasks
 GET /metrics/queues
 ```
 
+Task and task-event list endpoints return a paginated response object with
+`items`, `page`, `size`, `totalElements`, `totalPages`, `first`, and `last`.
+Task listings default to `createdAt,desc`; event listings default to
+`createdAt,asc`.
+
 Example enqueue request:
 
 ```json

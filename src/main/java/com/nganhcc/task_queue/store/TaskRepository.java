@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import com.nganhcc.task_queue.model.Task;
@@ -14,13 +16,19 @@ public interface TaskRepository extends JpaRepository<Task, UUID> {
 
     List<Task> findByStatus(TaskStatus status);
 
+    Page<Task> findByStatus(TaskStatus status, Pageable pageable);
+
     List<Task> findByQueueAndStatus(String queue, TaskStatus status);
+
+    Page<Task> findByQueueAndStatus(String queue, TaskStatus status, Pageable pageable);
 
     List<Task> findByStatusAndRunAtLessThanEqual(TaskStatus status, Instant runAt);
 
     List<Task> findByStatusAndStartedAtBefore(TaskStatus status, Instant startedAt);
 
     List<Task> findByQueue(String queue);
+
+    Page<Task> findByQueue(String queue, Pageable pageable);
 
     long countByStatus(TaskStatus status);
 

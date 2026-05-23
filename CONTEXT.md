@@ -24,6 +24,7 @@ Current implementation is a feature-complete backend foundation:
 - Stuck task reaper based on `heartbeatAt`
 - Task heartbeat endpoint
 - Persistent task execution history with `GET /tasks/{id}/events`
+- Paginated task and task-event listing with validated sorting
 - Redis-backed persistent queue pause state
 - Queue pause, resume, drain, run-once, force run-once, and purge operations
 - Queue, delayed, and DLQ purge operations that update DB task state
@@ -141,6 +142,10 @@ POST /dlq/{id}/replay?resetAttempts=true
 GET /metrics/tasks
 GET /metrics/queues
 ```
+
+`GET /tasks` and `GET /tasks/{id}/events` return paginated response objects
+with `items`, `page`, `size`, `totalElements`, `totalPages`, `first`, and
+`last`. Page defaults to `0`, size defaults to `50`, and max size is `200`.
 
 ## Configuration
 

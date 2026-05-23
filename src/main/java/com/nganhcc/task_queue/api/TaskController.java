@@ -1,7 +1,6 @@
 package com.nganhcc.task_queue.api;
 
 import java.net.URI;
-import java.util.List;
 import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
@@ -14,6 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import com.nganhcc.task_queue.api.dto.EnqueueTaskRequest;
+import com.nganhcc.task_queue.api.dto.PageResponse;
 import com.nganhcc.task_queue.api.dto.TaskEventResponse;
 import com.nganhcc.task_queue.api.dto.TaskResponse;
 import com.nganhcc.task_queue.model.TaskStatus;
@@ -40,8 +40,13 @@ public class TaskController {
     }
 
     @GetMapping("/tasks")
-    public ResponseEntity<List<TaskResponse>> listTasks(@RequestParam(required = false) String queue, @RequestParam(required = false) TaskStatus status){
-        return ResponseEntity.ok(taskService.listTasks(queue, status));
+    public ResponseEntity<PageResponse<TaskResponse>> listTasks(
+            @RequestParam(required = false) String queue,
+            @RequestParam(required = false) TaskStatus status,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size,
+            @RequestParam(required = false) String sort){
+        return ResponseEntity.ok(taskService.listTasks(queue, status, page, size, sort));
     }
 
     @GetMapping("/tasks/{id}")
@@ -51,8 +56,12 @@ public class TaskController {
     }
 
     @GetMapping("/tasks/{id}/events")
-    public ResponseEntity<List<TaskEventResponse>> listTaskEvents(@PathVariable UUID id){
-        return ResponseEntity.ok(taskService.listTaskEvents(id));
+    public ResponseEntity<PageResponse<TaskEventResponse>> listTaskEvents(
+            @PathVariable UUID id,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size,
+            @RequestParam(required = false) String sort){
+        return ResponseEntity.ok(taskService.listTaskEvents(id, page, size, sort));
     }
 
     @PostMapping("/tasks/{id}/cancel")
